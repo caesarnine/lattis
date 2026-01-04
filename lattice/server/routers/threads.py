@@ -3,7 +3,15 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic_ai.exceptions import UserError
 from lattice.core.session import generate_thread_id
-from lattice.core.threads import create_thread, delete_thread, list_threads
+from lattice.core.threads import (
+    ThreadAlreadyExistsError,
+    ThreadNotFoundError,
+    clear_thread,
+    create_thread,
+    delete_thread,
+    list_threads,
+    require_thread,
+)
 from lattice.protocol.models import (
     ThreadClearResponse,
     ThreadCreateRequest,
@@ -38,7 +46,7 @@ async def api_create_thread(
         thread_id = generate_thread_id()
     try:
         create_thread(ctx.store, session_id=session_id, thread_id=thread_id, workspace=ctx.workspace)
-    except ValueError as exc:
+    except ThreadAlreadyExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return ThreadCreateResponse(thread_id=thread_id)
 
@@ -49,9 +57,10 @@ async def api_delete_thread(
     thread_id: str,
     ctx: AppContext = Depends(get_ctx),
 ) -> ThreadDeleteResponse:
-    if thread_id not in list_threads(ctx.store, session_id):
-        raise HTTPException(status_code=404, detail="Thread not found.")
-    delete_thread(ctx.store, session_id=session_id, thread_id=thread_id)
+    try:
+        delete_thread(ctx.store, session_id=session_id, thread_id=thread_id)
+    except ThreadNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ThreadDeleteResponse(deleted=thread_id)
 
 
@@ -64,9 +73,10 @@ async def api_clear_thread(
     thread_id: str,
     ctx: AppContext = Depends(get_ctx),
 ) -> ThreadClearResponse:
-    if thread_id not in list_threads(ctx.store, session_id):
-        raise HTTPException(status_code=404, detail="Thread not found.")
-    ctx.store.save_thread(session_id, thread_id, workspace=ctx.workspace, messages=[])
+    try:
+        clear_thread(ctx.store, session_id=session_id, thread_id=thread_id, workspace=ctx.workspace)
+    except ThreadNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ThreadClearResponse(cleared=thread_id)
 
 
@@ -79,9 +89,10 @@ async def api_thread_state(
     thread_id: str,
     ctx: AppContext = Depends(get_ctx),
 ) -> ThreadStateResponse:
-    if thread_id not in list_threads(ctx.store, session_id):
-        raise HTTPException(status_code=404, detail="Thread not found.")
-    return build_thread_state(ctx, session_id=session_id, thread_id=thread_id)
+    try:
+        return build_thread_state(ctx, session_id=session_id, thread_id=thread_id)
+    except ThreadNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.patch(
@@ -94,8 +105,10 @@ async def api_update_thread_state(
     payload: ThreadStateUpdateRequest,
     ctx: AppContext = Depends(get_ctx),
 ) -> ThreadStateResponse:
-    if thread_id not in list_threads(ctx.store, session_id):
-        raise HTTPException(status_code=404, detail="Thread not found.")
+    try:
+        require_thread(ctx.store, session_id=session_id, thread_id=thread_id)
+    except ThreadNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     selection = select_agent_for_thread(ctx, session_id=session_id, thread_id=thread_id)
 
@@ -121,4 +134,7 @@ async def api_update_thread_state(
         except UserError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return build_thread_state(ctx, session_id=session_id, thread_id=thread_id)
+    try:
+        return build_thread_state(ctx, session_id=session_id, thread_id=thread_id)
+    except ThreadNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

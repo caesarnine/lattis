@@ -68,6 +68,14 @@ class SQLiteSessionStore(SessionStore):
             ).fetchall()
         return [row[0] for row in rows]
 
+    def thread_exists(self, session_id: str, thread_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM threads WHERE session_id = ? AND thread_id = ? LIMIT 1",
+                (session_id, thread_id),
+            ).fetchone()
+        return row is not None
+
     def list_sessions(self) -> list[str]:
         with self._connect() as conn:
             rows = conn.execute("SELECT session_id FROM sessions ORDER BY updated_at DESC").fetchall()

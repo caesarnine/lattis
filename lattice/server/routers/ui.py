@@ -10,6 +10,7 @@ from pydantic_ai.ui.vercel_ai.request_types import RequestData
 from lattice.agents.plugin import AgentRunContext
 from lattice.config import load_or_create_session_id
 from lattice.core.messages import merge_messages
+from lattice.core.threads import ThreadNotFoundError, load_thread_messages
 from lattice.server.context import AppContext
 from lattice.server.deps import get_ctx
 from lattice.server.services.agents import select_agent_for_thread
@@ -37,7 +38,10 @@ async def ui_chat(request: Request, ctx: AppContext = Depends(get_ctx)):
     agent = _create_agent(plugin, model_name)
 
     adapter = VercelAIAdapter(agent=agent, run_input=run_input, accept=request.headers.get("accept"))
-    message_history = _load_message_history(ctx, session_id, thread_id, run_input)
+    try:
+        message_history = _load_message_history(ctx, session_id, thread_id, run_input)
+    except ThreadNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     _log_message_history(session_id, thread_id, agent_selection.agent_id, run_input, message_history)
 
     run_ctx = AgentRunContext(
@@ -90,8 +94,8 @@ def _load_message_history(
     thread_id: str,
     run_input: RequestData,
 ):
-    thread_state = ctx.store.load_thread(session_id, thread_id, workspace=ctx.workspace)
-    return select_message_history(run_input, thread_state.messages)
+    messages = load_thread_messages(ctx.store, session_id=session_id, thread_id=thread_id, workspace=ctx.workspace)
+    return select_message_history(run_input, messages)
 
 
 def _log_message_history(

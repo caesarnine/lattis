@@ -17,12 +17,17 @@ from lattice.server.services.agents import (
 class FakeStore:
     def __init__(self) -> None:
         self._thread_settings: dict[tuple[str, str], ThreadSettings] = {}
+        self._threads: set[tuple[str, str]] = set()
 
     def get_thread_settings(self, session_id: str, thread_id: str) -> ThreadSettings:
         return self._thread_settings.get((session_id, thread_id), ThreadSettings())
 
     def set_thread_settings(self, session_id: str, thread_id: str, settings: ThreadSettings) -> None:
         self._thread_settings[(session_id, thread_id)] = settings
+        self._threads.add((session_id, thread_id))
+
+    def thread_exists(self, session_id: str, thread_id: str) -> bool:
+        return (session_id, thread_id) in self._threads
 
     def get_session_model(self, session_id: str) -> str | None:
         return None

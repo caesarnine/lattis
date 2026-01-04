@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from lattice.core.threads import list_threads
+from lattice.core.threads import ThreadNotFoundError, require_thread
 from lattice.protocol.models import ModelListResponse
 from lattice.server.context import AppContext
 from lattice.server.deps import get_ctx
@@ -21,8 +21,10 @@ async def api_list_thread_models(
     thread_id: str,
     ctx: AppContext = Depends(get_ctx),
 ) -> ModelListResponse:
-    if thread_id not in list_threads(ctx.store, session_id):
-        raise HTTPException(status_code=404, detail="Thread not found.")
+    try:
+        require_thread(ctx.store, session_id=session_id, thread_id=thread_id)
+    except ThreadNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     selection = select_agent_for_thread(ctx, session_id=session_id, thread_id=thread_id)
     default_model = resolve_default_model(selection.plugin)
     return ModelListResponse(default_model=default_model, models=list_models(selection.plugin))

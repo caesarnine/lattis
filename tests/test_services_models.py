@@ -26,6 +26,9 @@ class FakeStore:
     def set_session_model(self, session_id: str, model: str | None) -> None:
         self._session_models[session_id] = model
 
+    def thread_exists(self, session_id: str, thread_id: str) -> bool:
+        return True
+
     def get_thread_settings(self, session_id: str, thread_id: str):
         raise NotImplementedError
 
