@@ -24,111 +24,12 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
-from textual.suggester import Suggester
 from textual.widgets import Input, Static
 
 from lattice.client import AgentClient
 from lattice.core.session import generate_thread_id
+from lattice.tui.commands import CommandSuggester, ParsedCommand, build_help_text, parse_command
 from lattice.tui.widgets import ChatMessage, ToolCall
-
-
-class _CommandSuggester(Suggester):
-    def __init__(self, *, commands: list[str], model_provider, agent_provider) -> None:
-        super().__init__(use_cache=False, case_sensitive=False)
-        self._commands = commands
-        self._model_provider = model_provider
-        self._agent_provider = agent_provider
-
-    async def get_suggestion(self, value: str) -> str | None:
-        if not value.startswith("/"):
-            return None
-
-        if value.startswith("/model"):
-            return self._suggest_model(value)
-
-        if value.startswith("/agent"):
-            return self._suggest_agent(value)
-
-        for command in self._commands:
-            if command.startswith(value):
-                return command
-        return None
-
-    def _suggest_model(self, value: str) -> str | None:
-        if value == "/model":
-            return "/model "
-
-        remainder = value[len("/model") :].lstrip()
-        if remainder and "list".startswith(remainder):
-            return "/model list "
-        if remainder and "default".startswith(remainder):
-            return "/model default"
-        if remainder and "set".startswith(remainder):
-            return "/model set "
-        if remainder.startswith("list"):
-            return "/model list "
-        if remainder.startswith("default"):
-            return "/model default"
-        if remainder.startswith("set"):
-            if remainder == "set":
-                return "/model set "
-            if remainder.startswith("set "):
-                prefix = remainder[4:]
-                base = "/model set "
-            else:
-                prefix = remainder
-                base = "/model "
-        else:
-            prefix = remainder
-            base = "/model "
-
-        models = self._model_provider() or []
-        if not models:
-            return None
-
-        needle = prefix.casefold()
-        for model in models:
-            if model.casefold().startswith(needle):
-                return f"{base}{model}"
-        return None
-
-    def _suggest_agent(self, value: str) -> str | None:
-        if value == "/agent":
-            return "/agent "
-
-        remainder = value[len("/agent") :].lstrip()
-        if remainder and "list".startswith(remainder):
-            return "/agent list "
-        if remainder and "default".startswith(remainder):
-            return "/agent default"
-        if remainder and "set".startswith(remainder):
-            return "/agent set "
-        if remainder.startswith("list"):
-            return "/agent list "
-        if remainder.startswith("default"):
-            return "/agent default"
-        if remainder.startswith("set"):
-            if remainder == "set":
-                return "/agent set "
-            if remainder.startswith("set "):
-                prefix = remainder[4:]
-                base = "/agent set "
-            else:
-                prefix = remainder
-                base = "/agent "
-        else:
-            prefix = remainder
-            base = "/agent "
-
-        agents = self._agent_provider() or []
-        if not agents:
-            return None
-
-        needle = prefix.casefold()
-        for agent_id in agents:
-            if agent_id.casefold().startswith(needle):
-                return f"{base}{agent_id}"
-        return None
 
 
 class AgentApp(App):
@@ -222,25 +123,7 @@ class AgentApp(App):
         self._model_loading = False
         self.client = client
         self.connection_info = connection_info
-        self._command_suggester = _CommandSuggester(
-            commands=[
-                "/help",
-                "/threads",
-                "/thread",
-                "/thread new",
-                "/thread delete",
-                "/clear",
-                "/agent",
-                "/agent list",
-                "/agent set",
-                "/agent default",
-                "/model",
-                "/model list",
-                "/model set",
-                "/model default",
-                "/quit",
-                "/exit",
-            ],
+        self._command_suggester = CommandSuggester(
             model_provider=self._get_model_suggestions,
             agent_provider=self._get_agent_suggestions,
         )
@@ -251,6 +134,18 @@ class AgentApp(App):
         self._tool_calls: dict[str, ToolCall] = {}
         self._message_map: dict[str, ChatMessage] = {}
         self._mounted = False
+        self._event_handlers = {
+            "text-start": self._on_text_start_event,
+            "text-delta": self._on_text_delta_event,
+            "reasoning-start": self._on_reasoning_start_event,
+            "reasoning-delta": self._on_reasoning_delta_event,
+            "tool-input-start": self._on_tool_input_start_event,
+            "tool-input-delta": self._on_tool_input_delta_event,
+            "tool-input-available": self._on_tool_input_available_event,
+            "tool-output-available": self._on_tool_output_available_event,
+            "tool-output-error": self._on_tool_output_error_event,
+            "error": self._on_error_event,
+        }
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="header"):
@@ -301,10 +196,7 @@ class AgentApp(App):
     def action_clear_chat(self) -> None:
         chat = self.query_one("#chat-scroll", VerticalScroll)
         chat.remove_children()
-        self._current_assistant = None
-        self._current_thinking = None
-        self._tool_calls = {}
-        self._message_map = {}
+        self._reset_message_state()
 
     # -------------------------------------------------------------------------
     # Input Handling
@@ -318,34 +210,8 @@ class AgentApp(App):
         if not user_input:
             return
 
-        if user_input.lower() in {"/quit", "/exit"}:
-            self.exit()
-            return
-
-        if user_input.lower() == "/clear":
-            await self._clear_current_thread()
-            return
-
-        if user_input.lower() in {"/help", "/?"}:
-            self._add_system_message(self._help_text())
-            return
-
-        if user_input.lower().startswith("/agent"):
-            await self._handle_agent_command(user_input)
-            return
-
-        if user_input.lower().startswith("/model"):
-            await self._handle_model_command(user_input)
-            return
-
-        if user_input.lower() == "/threads":
-            threads = await self.client.list_threads(self.session_id)
-            listing = ", ".join(threads) if threads else "(none)"
-            self._add_system_message(f"Threads: {listing}")
-            return
-
-        if user_input.lower().startswith("/thread"):
-            await self._handle_thread_command(user_input)
+        command = parse_command(user_input)
+        if command and await self._dispatch_command(command):
             return
 
         self._add_user_message(user_input)
@@ -359,17 +225,43 @@ class AgentApp(App):
         if value.startswith("/agent") and self._agent_cache is None and not self._agent_loading:
             self.run_worker(self._prefetch_agents(), exclusive=False)
 
-    async def _handle_thread_command(self, user_input: str) -> None:
-        parts = user_input.split()
+    async def _dispatch_command(self, command: ParsedCommand) -> bool:
+        if command.name == "quit":
+            self.exit()
+            return True
+        if command.name == "clear":
+            await self._clear_current_thread()
+            return True
+        if command.name == "help":
+            self._add_system_message(build_help_text())
+            return True
+        if command.name == "threads":
+            threads = await self.client.list_threads(self.session_id)
+            listing = ", ".join(threads) if threads else "(none)"
+            self._add_system_message(f"Threads: {listing}")
+            return True
+        if command.name == "thread":
+            await self._handle_thread_command(command)
+            return True
+        if command.name == "agent":
+            await self._handle_agent_command(command)
+            return True
+        if command.name == "model":
+            await self._handle_model_command(command)
+            return True
+        return False
 
-        if len(parts) == 1:
+    async def _handle_thread_command(self, command: ParsedCommand) -> None:
+        parts = command.args
+
+        if not parts:
             self._add_system_message(f"Current thread: {self.thread_id}")
             return
 
-        subcommand = parts[1].lower()
+        subcommand = parts[0].lower()
 
         if subcommand in {"new", "create"}:
-            new_id = parts[2].strip() if len(parts) > 2 else generate_thread_id()
+            new_id = parts[1].strip() if len(parts) > 1 else generate_thread_id()
             if await self._thread_exists(new_id):
                 self._add_system_message(f"Thread '{new_id}' already exists.")
                 return
@@ -378,21 +270,21 @@ class AgentApp(App):
             return
 
         if subcommand in {"delete", "del", "rm"}:
-            if len(parts) < 3:
+            if len(parts) < 2:
                 self._add_system_message("Usage: /thread delete <id>")
                 return
-            await self._delete_thread(parts[2].strip())
+            await self._delete_thread(parts[1].strip())
             return
 
-        target = parts[1].strip()
+        target = parts[0].strip()
         if target == self.thread_id:
             self._add_system_message(f"Already on thread '{self.thread_id}'.")
             return
         await self._switch_thread(target, created=not await self._thread_exists(target))
 
-    async def _handle_agent_command(self, user_input: str) -> None:
-        parts = user_input.split()
-        if len(parts) == 1 or parts[1].lower() in {"current", "show"}:
+    async def _handle_agent_command(self, command: ParsedCommand) -> None:
+        parts = command.args
+        if not parts or parts[0].lower() in {"current", "show"}:
             await self._refresh_agent()
             if self.agent_name and self.agent_id:
                 self._add_system_message(f"Current agent: {self.agent_name} ({self.agent_id})")
@@ -400,10 +292,10 @@ class AgentApp(App):
                 self._add_system_message(f"Current agent: {self.agent_id or '(unknown)'}")
             return
 
-        subcommand = parts[1].lower()
+        subcommand = parts[0].lower()
 
         if subcommand == "list":
-            query = " ".join(parts[2:]).strip()
+            query = " ".join(parts[1:]).strip()
             agents = await self._load_agents()
             needle = query.lower()
             if query:
@@ -436,10 +328,10 @@ class AgentApp(App):
             return
 
         if subcommand == "set":
-            if len(parts) < 3:
+            if len(parts) < 2:
                 self._add_system_message("Usage: /agent set <agent-id|number>")
                 return
-            value = " ".join(parts[2:]).strip()
+            value = " ".join(parts[1:]).strip()
             agent_id = await self._resolve_agent_id(value)
             if agent_id is None:
                 return
@@ -447,7 +339,7 @@ class AgentApp(App):
             return
 
         # Assume /agent <id|number>
-        value = " ".join(parts[1:]).strip()
+        value = " ".join(parts).strip()
         if not value:
             self._add_system_message("Usage: /agent <agent-id|number>")
             return
@@ -456,18 +348,18 @@ class AgentApp(App):
             return
         await self._set_thread_agent(agent_id)
 
-    async def _handle_model_command(self, user_input: str) -> None:
-        parts = user_input.split()
-        if len(parts) == 1 or parts[1].lower() in {"current", "show"}:
+    async def _handle_model_command(self, command: ParsedCommand) -> None:
+        parts = command.args
+        if not parts or parts[0].lower() in {"current", "show"}:
             await self._refresh_model()
             current = self.model_name or "(unknown)"
             self._add_system_message(f"Current model: {current}")
             return
 
-        subcommand = parts[1].lower()
+        subcommand = parts[0].lower()
 
         if subcommand == "list":
-            query = " ".join(parts[2:]).strip()
+            query = " ".join(parts[1:]).strip()
             models = await self._load_models()
             if query:
                 matches = [m for m in models if query.lower() in m.lower()]
@@ -492,15 +384,15 @@ class AgentApp(App):
             return
 
         if subcommand == "set":
-            if len(parts) < 3:
+            if len(parts) < 2:
                 self._add_system_message("Usage: /model set <model-name>")
                 return
-            model_name = " ".join(parts[2:]).strip()
+            model_name = " ".join(parts[1:]).strip()
             await self._set_session_model(model_name)
             return
 
         # Assume /model <name>
-        model_name = " ".join(parts[1:]).strip()
+        model_name = " ".join(parts).strip()
         if not model_name:
             self._add_system_message("Usage: /model <model-name>")
             return
@@ -626,27 +518,6 @@ class AgentApp(App):
         else:
             self._add_system_message(f"Model set to: {payload.model}")
 
-    def _help_text(self) -> str:
-        lines = [
-            "Commands:",
-            "/help                     Show this help message",
-            "/threads                  List threads",
-            "/thread <id>              Switch to a thread",
-            "/thread new [id]          Create a new thread",
-            "/thread delete <id>       Delete a thread",
-            "/clear                    Clear current thread history",
-            "/agent                    Show current agent",
-            "/agent list [filter]      List or search agents",
-            "/agent set <id|number>    Set thread agent",
-            "/agent default            Reset to default agent",
-            "/model                    Show current model",
-            "/model list [filter]      List or search models",
-            "/model set <name>         Set session model",
-            "/model default            Reset to default model",
-            "/quit or /exit            Exit the app",
-        ]
-        return "\n".join(lines)
-
     async def _clear_current_thread(self) -> None:
         self.action_clear_chat()
         try:
@@ -660,10 +531,7 @@ class AgentApp(App):
 
     async def _run_agent(self, user_input: str) -> None:
         self._set_status("streaming", streaming=True)
-        self._current_assistant = None
-        self._current_thinking = None
-        self._tool_calls = {}
-        self._message_map = {}
+        self._reset_message_state()
 
         run_input = self._build_run_input(user_input)
 
@@ -692,63 +560,66 @@ class AgentApp(App):
 
     def _handle_ui_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
-        if event_type == "text-start":
-            message_id = str(event.get("id") or uuid4().hex)
-            self._handle_text_message_start(message_id)
+        if not isinstance(event_type, str):
             return
-        if event_type == "text-delta":
-            message_id = str(event.get("id") or "")
-            delta = str(event.get("delta") or "")
-            if message_id:
-                self._handle_text_message_content(message_id, delta)
+        handler = self._event_handlers.get(event_type)
+        if handler:
+            handler(event)
+
+    def _on_text_start_event(self, event: dict[str, Any]) -> None:
+        message_id = str(event.get("id") or uuid4().hex)
+        self._handle_text_message_start(message_id)
+
+    def _on_text_delta_event(self, event: dict[str, Any]) -> None:
+        message_id = str(event.get("id") or "")
+        delta = str(event.get("delta") or "")
+        if message_id:
+            self._handle_text_message_content(message_id, delta)
+
+    def _on_reasoning_start_event(self, event: dict[str, Any]) -> None:
+        message_id = str(event.get("id") or uuid4().hex)
+        self._handle_thinking_start(message_id)
+
+    def _on_reasoning_delta_event(self, event: dict[str, Any]) -> None:
+        message_id = str(event.get("id") or "")
+        delta = str(event.get("delta") or "")
+        if message_id:
+            self._handle_thinking_delta(message_id, delta)
+
+    def _on_tool_input_start_event(self, event: dict[str, Any]) -> None:
+        self._handle_tool_input_event(event, include_args=False)
+
+    def _on_tool_input_delta_event(self, event: dict[str, Any]) -> None:
+        tool_call_id = str(event.get("toolCallId") or "")
+        delta = str(event.get("inputTextDelta") or "")
+        if tool_call_id and delta:
+            self._append_tool_args(tool_call_id, delta)
+
+    def _on_tool_input_available_event(self, event: dict[str, Any]) -> None:
+        self._handle_tool_input_event(event, include_args=True)
+
+    def _handle_tool_input_event(self, event: dict[str, Any], *, include_args: bool) -> None:
+        tool_call_id = str(event.get("toolCallId") or "")
+        if not tool_call_id:
             return
-        if event_type == "text-end":
-            return
-        if event_type == "reasoning-start":
-            message_id = str(event.get("id") or uuid4().hex)
-            self._handle_thinking_start(message_id)
-            return
-        if event_type == "reasoning-delta":
-            message_id = str(event.get("id") or "")
-            delta = str(event.get("delta") or "")
-            if message_id:
-                self._handle_thinking_delta(message_id, delta)
-            return
-        if event_type == "reasoning-end":
-            return
-        if event_type == "tool-input-start":
-            tool_call_id = str(event.get("toolCallId") or "")
-            tool_name = str(event.get("toolName") or "tool")
-            if tool_call_id:
-                self._add_tool_call(tool_name, "", tool_call_id)
-            return
-        if event_type == "tool-input-delta":
-            tool_call_id = str(event.get("toolCallId") or "")
-            delta = str(event.get("inputTextDelta") or "")
-            if tool_call_id and delta:
-                self._append_tool_args(tool_call_id, delta)
-            return
-        if event_type == "tool-input-available":
-            tool_call_id = str(event.get("toolCallId") or "")
-            tool_name = str(event.get("toolName") or "tool")
-            if tool_call_id:
-                self._add_tool_call(tool_name, event.get("input"), tool_call_id)
-            return
-        if event_type == "tool-output-available":
-            tool_call_id = str(event.get("toolCallId") or "")
-            if tool_call_id:
-                self._set_tool_result(tool_call_id, event.get("output"))
-            return
-        if event_type == "tool-output-error":
-            tool_call_id = str(event.get("toolCallId") or "")
-            error_text = str(event.get("errorText") or "Tool error")
-            if tool_call_id:
-                self._set_tool_result(tool_call_id, {"stderr": error_text, "exit_code": 1})
-            return
-        if event_type == "error":
-            error_text = str(event.get("errorText") or "Unknown error")
-            self._add_system_message(f"Run error: {error_text}")
-            return
+        tool_name = str(event.get("toolName") or "tool")
+        args = event.get("input") if include_args else ""
+        self._add_tool_call(tool_name, args, tool_call_id)
+
+    def _on_tool_output_available_event(self, event: dict[str, Any]) -> None:
+        tool_call_id = str(event.get("toolCallId") or "")
+        if tool_call_id:
+            self._set_tool_result(tool_call_id, event.get("output"))
+
+    def _on_tool_output_error_event(self, event: dict[str, Any]) -> None:
+        tool_call_id = str(event.get("toolCallId") or "")
+        error_text = str(event.get("errorText") or "Tool error")
+        if tool_call_id:
+            self._set_tool_result(tool_call_id, {"stderr": error_text, "exit_code": 1})
+
+    def _on_error_event(self, event: dict[str, Any]) -> None:
+        error_text = str(event.get("errorText") or "Unknown error")
+        self._add_system_message(f"Run error: {error_text}")
 
     def _handle_text_message_start(self, message_id: str, role: str = "assistant") -> None:
         msg = ChatMessage(role=role)
@@ -878,6 +749,12 @@ class AgentApp(App):
     # -------------------------------------------------------------------------
     # Message Helpers
     # -------------------------------------------------------------------------
+
+    def _reset_message_state(self) -> None:
+        self._current_assistant = None
+        self._current_thinking = None
+        self._tool_calls = {}
+        self._message_map = {}
 
     def _add_user_message(self, content: str) -> None:
         chat = self.query_one("#chat-scroll", VerticalScroll)

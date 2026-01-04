@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 
 import httpx
@@ -34,51 +35,60 @@ class AgentClient:
         self.base_url = base_url.rstrip("/")
         self._client = client or httpx.AsyncClient(base_url=self.base_url, timeout=timeout)
 
+    @staticmethod
+    def _format_error_message(fallback: str, detail: str) -> str:
+        return f"{fallback}. {detail}" if detail else fallback
+
+    def _extract_detail(self, response: httpx.Response, *, body: bytes | None = None) -> str:
+        data: object | None = None
+        if body is None:
+            try:
+                data = response.json()
+            except Exception:
+                data = None
+        else:
+            try:
+                data = json.loads(body)
+            except Exception:
+                data = None
+        if isinstance(data, dict) and data.get("detail"):
+            return str(data["detail"])
+
+        if body is None:
+            try:
+                text = response.text
+                if text:
+                    return text.strip()
+            except Exception:
+                return ""
+        else:
+            try:
+                text = body.decode("utf-8", errors="ignore").strip()
+                if text:
+                    return text
+            except Exception:
+                return ""
+        return ""
+
     def _raise_for_status(self, response: httpx.Response, fallback: str) -> None:
         try:
             response.raise_for_status()
             return
         except httpx.HTTPStatusError as exc:
-            detail = ""
-            try:
-                data = response.json()
-                if isinstance(data, dict) and data.get("detail"):
-                    detail = str(data["detail"])
-            except Exception:
-                detail = ""
-            if not detail:
-                try:
-                    text = response.text
-                    if text:
-                        detail = text.strip()
-                except Exception:
-                    detail = ""
-            message = fallback
-            if detail:
-                message = f"{fallback}. {detail}"
+            detail = self._extract_detail(response)
+            message = self._format_error_message(fallback, detail)
             raise RuntimeError(message) from exc
 
     async def _raise_for_status_async(self, response: httpx.Response, fallback: str) -> None:
         if response.status_code < 400:
             return
-        detail = ""
+        body: bytes | None = None
         try:
             body = await response.aread()
-            if body:
-                try:
-                    data = response.json()
-                    if isinstance(data, dict) and data.get("detail"):
-                        detail = str(data["detail"])
-                except Exception:
-                    try:
-                        detail = body.decode("utf-8", errors="ignore").strip()
-                    except Exception:
-                        detail = ""
         except Exception:
-            detail = ""
-        message = fallback
-        if detail:
-            message = f"{fallback}. {detail}"
+            body = None
+        detail = self._extract_detail(response, body=body)
+        message = self._format_error_message(fallback, detail)
         raise RuntimeError(message)
 
     async def close(self) -> None:

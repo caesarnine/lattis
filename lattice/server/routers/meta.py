@@ -9,6 +9,7 @@ from lattice.config import load_or_create_session_id
 from lattice.protocol.models import ServerInfoResponse
 from lattice.server.context import AppContext
 from lattice.server.deps import get_ctx
+from lattice.server.services.agents import get_default_plugin
 
 router = APIRouter()
 
@@ -20,7 +21,7 @@ async def health() -> dict[str, str]:
 
 @router.get("/info", response_model=ServerInfoResponse)
 async def info(ctx: AppContext = Depends(get_ctx)) -> ServerInfoResponse:
-    default_plugin = ctx.registry.agents[ctx.registry.default_agent]
+    default_plugin = get_default_plugin(ctx)
     try:
         version = importlib.metadata.version("lattice")
     except importlib.metadata.PackageNotFoundError:  # pragma: no cover

@@ -10,14 +10,17 @@ from lattice.protocol.models import (
 )
 from lattice.server.context import AppContext
 from lattice.server.deps import get_ctx
-from lattice.server.runtime import resolve_agent_plugin
+from lattice.server.services.agents import select_agent_for_thread, set_thread_agent
 
 router = APIRouter()
 
 
 @router.get("/agents", response_model=AgentListResponse)
 async def api_list_agents(ctx: AppContext = Depends(get_ctx)) -> AgentListResponse:
-    agents = [AgentInfo(id=agent_id, name=plugin.name) for agent_id, plugin in ctx.registry.agents.items()]
+    agents = [
+        AgentInfo(id=spec.id, name=spec.name)
+        for spec in ctx.registry.list_specs()
+    ]
     return AgentListResponse(default_agent=ctx.registry.default_agent, agents=agents)
 
 
@@ -30,13 +33,12 @@ async def api_get_thread_agent(
     thread_id: str,
     ctx: AppContext = Depends(get_ctx),
 ) -> ThreadAgentResponse:
-    default_agent = ctx.registry.default_agent
-    agent_id, plugin = resolve_agent_plugin(ctx, session_id=session_id, thread_id=thread_id)
+    selection = select_agent_for_thread(ctx, session_id=session_id, thread_id=thread_id)
     return ThreadAgentResponse(
-        agent=agent_id,
-        default_agent=default_agent,
-        is_default=agent_id == default_agent,
-        agent_name=plugin.name,
+        agent=selection.agent_id,
+        default_agent=selection.default_agent_id,
+        is_default=selection.is_default,
+        agent_name=selection.agent_name,
     )
 
 
@@ -50,29 +52,18 @@ async def api_set_thread_agent(
     payload: ThreadAgentRequest,
     ctx: AppContext = Depends(get_ctx),
 ) -> ThreadAgentResponse:
-    default_agent = ctx.registry.default_agent
-    settings = ctx.store.get_thread_settings(session_id, thread_id)
-    requested = (payload.agent or "").strip() if payload.agent is not None else None
-    if requested:
-        resolved = ctx.registry.resolve_id(requested, allow_fuzzy=True)
-        if resolved is None:
-            available = ", ".join(sorted({plugin.name for plugin in ctx.registry.agents.values()}))
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown or ambiguous agent '{requested}'. Available: {available}",
-            )
-        settings.agent = resolved
-        ctx.store.set_thread_settings(session_id, thread_id, settings)
-        selected = resolved
-    else:
-        settings.agent = None
-        ctx.store.set_thread_settings(session_id, thread_id, settings)
-        selected = default_agent
-
-    plugin = ctx.registry.agents[selected]
+    try:
+        selection = set_thread_agent(
+            ctx,
+            session_id=session_id,
+            thread_id=thread_id,
+            requested=payload.agent,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ThreadAgentResponse(
-        agent=selected,
-        default_agent=default_agent,
-        is_default=selected == default_agent,
-        agent_name=plugin.name,
+        agent=selection.agent_id,
+        default_agent=selection.default_agent_id,
+        is_default=selection.is_default,
+        agent_name=selection.agent_name,
     )

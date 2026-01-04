@@ -180,12 +180,13 @@ def _run_tui_command(args: argparse.Namespace) -> None:
 
 def _run_server_command(args: argparse.Namespace) -> None:
     project_root = Path.cwd()
-    os.environ.setdefault("LATTICE_PROJECT_ROOT", str(project_root))
-    os.environ.setdefault("LATTICE_WORKSPACE_MODE", args.workspace)
-    if args.agent:
-        os.environ["AGENT_DEFAULT"] = str(args.agent)
-    if args.agents:
-        os.environ["AGENT_PLUGINS"] = str(args.agents)
+    agent_specs = _parse_agent_specs(getattr(args, "agents", None))
+    _apply_server_env_defaults(
+        project_root=project_root,
+        workspace_mode=args.workspace,
+        default_agent=getattr(args, "agent", None),
+        agent_specs=agent_specs,
+    )
 
     uvicorn.run("lattice.server.asgi:app", host=args.host, port=args.port, reload=args.reload)
 
@@ -243,13 +244,12 @@ def _spawn_local_server(
     port = _pick_local_port(host)
     server_url = f"http://{host}:{port}"
 
-    env = os.environ.copy()
-    env["LATTICE_PROJECT_ROOT"] = str(project_root)
-    env["LATTICE_WORKSPACE_MODE"] = "local"
-    if default_agent is not None:
-        env["AGENT_DEFAULT"] = str(default_agent)
-    if agent_specs is not None:
-        env["AGENT_PLUGINS"] = ",".join(agent_specs)
+    env = _build_server_env(
+        project_root=project_root,
+        workspace_mode="local",
+        default_agent=default_agent,
+        agent_specs=agent_specs,
+    )
 
     cmd = [
         sys.executable,
@@ -312,57 +312,112 @@ def _create_tui_client(
     args: argparse.Namespace, *, project_root: Path
 ) -> TuiClientContext:
     agent_spec = getattr(args, "agent", None)
-    agents = getattr(args, "agents", None)
-    agent_specs = [item.strip() for item in agents.split(",")] if isinstance(agents, str) and agents else None
+    agent_specs = _parse_agent_specs(getattr(args, "agents", None))
 
     # --local flag: skip all discovery, spawn local server
     if getattr(args, "local", False):
-        local_server = _spawn_local_server(
+        return _start_local_server(
             project_root=project_root,
             agent_specs=agent_specs,
             default_agent=agent_spec,
-        )
-        client = AgentClient(local_server.server_url)
-        return TuiClientContext(
-            client=client,
-            connection_info=ConnectionInfo(mode="local-server", server_url=local_server.server_url),
-            local_server=local_server,
         )
 
     # --server URL: explicit connection (no project validation)
     server = getattr(args, "server", None)
     if server:
         server_url = _normalize_server_url(server)
-        if not _server_healthy(server_url):
-            print(
-                f"Server not reachable at {server_url}. Start it with `lattice server`.",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-        return TuiClientContext(
-            client=AgentClient(server_url),
-            connection_info=ConnectionInfo(mode="server", server_url=server_url),
-        )
+        _ensure_server_healthy(server_url)
+        return _build_server_context(server_url)
 
     # Auto-discovery: check default port, validate project
     auto_url = f"http://127.0.0.1:{DEFAULT_AUTO_DISCOVER_PORT}"
     if _server_healthy(auto_url):
         if _is_same_project(auto_url, project_root):
-            return TuiClientContext(
-                client=AgentClient(auto_url),
-                connection_info=ConnectionInfo(mode="server", server_url=auto_url),
-            )
+            return _build_server_context(auto_url)
         # Different project - silently fall back to local
 
     # Fallback: spawn local server
-    local_server = _spawn_local_server(
+    return _start_local_server(
         project_root=project_root,
         agent_specs=agent_specs,
         default_agent=agent_spec,
     )
-    client = AgentClient(local_server.server_url)
+
+
+def _parse_agent_specs(value: str | None) -> list[str] | None:
+    if not isinstance(value, str):
+        return None
+    items = [item.strip() for item in value.split(",")]
+    filtered = [item for item in items if item]
+    return filtered or None
+
+
+def _apply_server_env_defaults(
+    *,
+    project_root: Path,
+    workspace_mode: str,
+    default_agent: str | None,
+    agent_specs: list[str] | None,
+) -> None:
+    os.environ.setdefault("LATTICE_PROJECT_ROOT", str(project_root))
+    os.environ.setdefault("LATTICE_WORKSPACE_MODE", workspace_mode)
+    if default_agent:
+        os.environ["AGENT_DEFAULT"] = str(default_agent)
+    if agent_specs:
+        os.environ["AGENT_PLUGINS"] = ",".join(agent_specs)
+
+
+def _build_server_env(
+    *,
+    project_root: Path,
+    workspace_mode: str,
+    default_agent: str | None,
+    agent_specs: list[str] | None,
+) -> dict[str, str]:
+    env = os.environ.copy()
+    env["LATTICE_PROJECT_ROOT"] = str(project_root)
+    env["LATTICE_WORKSPACE_MODE"] = workspace_mode
+    if default_agent is not None:
+        env["AGENT_DEFAULT"] = str(default_agent)
+    if agent_specs is not None:
+        env["AGENT_PLUGINS"] = ",".join(agent_specs)
+    return env
+
+
+def _build_server_context(server_url: str) -> TuiClientContext:
     return TuiClientContext(
-        client=client,
+        client=AgentClient(server_url),
+        connection_info=ConnectionInfo(mode="server", server_url=server_url),
+    )
+
+
+def _build_local_server_context(local_server: SpawnedServer) -> TuiClientContext:
+    return TuiClientContext(
+        client=AgentClient(local_server.server_url),
         connection_info=ConnectionInfo(mode="local-server", server_url=local_server.server_url),
         local_server=local_server,
     )
+
+
+def _start_local_server(
+    *,
+    project_root: Path,
+    agent_specs: list[str] | None,
+    default_agent: str | None,
+) -> TuiClientContext:
+    local_server = _spawn_local_server(
+        project_root=project_root,
+        agent_specs=agent_specs,
+        default_agent=default_agent,
+    )
+    return _build_local_server_context(local_server)
+
+
+def _ensure_server_healthy(server_url: str) -> None:
+    if _server_healthy(server_url):
+        return
+    print(
+        f"Server not reachable at {server_url}. Start it with `lattice server`.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
