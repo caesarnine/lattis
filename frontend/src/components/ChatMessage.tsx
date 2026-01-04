@@ -1,19 +1,9 @@
-import React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { motion, AnimatePresence } from "framer-motion";
-import { Copy, Check } from "lucide-react";
+import { motion } from "framer-motion";
 
 import { cn } from "@/lib/utils";
-
-export type ChatRole =
-  | "user"
-  | "assistant"
-  | "system"
-  | "thinking"
-  | "developer"
-  | "tool"
-  | string;
+import { type ChatRole } from "@/lib/chat";
 
 const ROLE_LABELS: Record<string, string> = {
   user: "You",
@@ -47,25 +37,6 @@ export type ChatMessageProps = {
   content: string;
   className?: string;
 };
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = React.useState(false);
-
-  const handleCopy = async () => {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <button
-      onClick={handleCopy}
-      className="absolute right-2 top-2 rounded-lg bg-white/10 p-1.5 text-white/50 transition-colors hover:bg-white/20 hover:text-white"
-    >
-      {copied ? <Check size={14} /> : <Copy size={14} />}
-    </button>
-  );
-}
 
 export function ChatMessage({ role, content, className }: ChatMessageProps) {
   const label = ROLE_LABELS[role] ?? role;

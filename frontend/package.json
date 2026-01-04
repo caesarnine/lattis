@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "gen:openapi": "uv run python ../scripts/generate_openapi_json.py --out openapi.json && openapi-typescript openapi.json -o src/lib/openapi.ts",
+    "lint": "tsc -p tsconfig.json --noEmit",
     "build": "npm run gen:openapi && vite build",
     "preview": "vite preview"
   },
