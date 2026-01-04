@@ -73,7 +73,11 @@ Built-in agents:
 
 - **TUI**: use `/agent`, `/agent list`, `/agent set <id|number>`, `/agent default`
 - **Web UI**: use the sidebar agent selector
-- **API**: `PUT /sessions/{session_id}/threads/{thread_id}/agent` with `{"agent": "<id-or-name>"}` (or `null` to reset)
+- **API**: `PATCH /sessions/{session_id}/threads/{thread_id}/state` with `{"agent": "<id-or-name>"}` (or `null` to reset)
+
+### Client integration
+
+See `docs/client-integration.md` for the thin-client API flow (bootstrap, thread state, model options, streaming).
 
 ### Add your own agent plugins
 

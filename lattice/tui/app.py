@@ -150,21 +150,15 @@ class AgentApp(App):
         self.query_one("#input", Input).focus()
 
         try:
-            self.session_id = await self.client.get_session_id()
+            bootstrap = await self.client.bootstrap_session()
         except Exception as exc:
             self._add_system_message(f"Failed to load session: {exc}")
             return
 
-        threads = await self.client.list_threads(self.session_id)
-        if threads:
-            self.thread_id = threads[0]
-        else:
-            self.thread_id = "default"
-            await self.client.create_thread(self.session_id, self.thread_id)
-
-        await self._refresh_agent()
-        await self._refresh_model()
-        self.run_worker(self._load_thread_state(self.thread_id), exclusive=False)
+        self.session_id = bootstrap.session_id
+        self.action_clear_chat()
+        self._apply_thread_state(bootstrap)
+        self._scroll_to_bottom()
 
     async def on_shutdown(self) -> None:
         await self.client.close()
@@ -392,7 +386,7 @@ class AgentApp(App):
             return self.model_state.cache or []
         self.model_state.loading = True
         try:
-            payload = await self.client.list_models()
+            payload = await self.client.list_thread_models(self.session_id, self.thread_id)
         except Exception as exc:
             self._add_system_message(f"Failed to load models: {exc}")
             self.model_state.loading = False
@@ -433,16 +427,18 @@ class AgentApp(App):
             return []
         return [agent_id for agent_id, _ in self.agent_state.cache]
 
-    async def _refresh_agent(self) -> None:
+    async def _refresh_thread_state(self) -> bool:
         try:
-            payload = await self.client.get_thread_agent(self.session_id, self.thread_id)
+            state = await self.client.get_thread_state(self.session_id, self.thread_id)
         except Exception as exc:
-            self._add_system_message(f"Failed to load agent: {exc}")
+            self._add_system_message(f"Failed to load thread state: {exc}")
+            return False
+        self._apply_thread_selection(state)
+        return True
+
+    async def _refresh_agent(self) -> None:
+        if not await self._refresh_thread_state():
             return
-        self.agent_state.current_id = payload.agent
-        self.agent_state.current_name = payload.agent_name
-        self.agent_state.default_id = payload.default_agent
-        self._update_header()
 
     async def _resolve_agent_id(self, value: str) -> str | None:
         value = value.strip()
@@ -465,45 +461,41 @@ class AgentApp(App):
 
     async def _set_thread_agent(self, agent_id: str | None) -> None:
         try:
-            payload = await self.client.set_thread_agent(self.session_id, self.thread_id, agent_id)
+            state = await self.client.update_thread_state(
+                self.session_id,
+                self.thread_id,
+                agent=agent_id,
+            )
         except Exception as exc:
             self._add_system_message(f"Failed to set agent: {exc}")
             return
-
-        self.agent_state.current_id = payload.agent
-        self.agent_state.current_name = payload.agent_name
-        self.agent_state.default_id = payload.default_agent
-        await self._refresh_model()
+        self._apply_thread_selection(state)
 
         label = self.agent_state.label()
-        if payload.is_default:
+        if state.agent.is_default:
             self._add_system_message(f"Agent reset to default: {label}")
         else:
             self._add_system_message(f"Agent set to: {label}")
 
     async def _refresh_model(self) -> None:
-        try:
-            payload = await self.client.get_session_model(self.session_id)
-        except Exception as exc:
-            self._add_system_message(f"Failed to load model: {exc}")
+        if not await self._refresh_thread_state():
             return
-        self.model_state.current = payload.model
-        self.model_state.default = payload.default_model
-        self._update_header()
 
     async def _set_session_model(self, model_name: str | None) -> None:
         try:
-            payload = await self.client.set_session_model(self.session_id, model_name)
+            state = await self.client.update_thread_state(
+                self.session_id,
+                self.thread_id,
+                model=model_name,
+            )
         except Exception as exc:
             self._add_system_message(f"Failed to set model: {exc}")
             return
-        self.model_state.current = payload.model
-        self.model_state.default = payload.default_model
-        self._update_header()
-        if payload.is_default:
-            self._add_system_message(f"Model reset to default: {payload.model}")
+        self._apply_thread_selection(state)
+        if state.model.is_default:
+            self._add_system_message(f"Model reset to default: {state.model.model}")
         else:
-            self._add_system_message(f"Model set to: {payload.model}")
+            self._add_system_message(f"Model set to: {state.model.model}")
 
     async def _clear_current_thread(self) -> None:
         self.action_clear_chat()
@@ -646,6 +638,24 @@ class AgentApp(App):
     # Thread Management
     # -------------------------------------------------------------------------
 
+    def _apply_thread_selection(self, state) -> None:
+        previous_thread = self.thread_id
+        previous_agent = self.agent_state.current_id
+        self.thread_id = state.thread_id
+        self.agent_state.current_id = state.agent.agent
+        self.agent_state.current_name = state.agent.agent_name
+        self.agent_state.default_id = state.agent.default_agent
+        self.model_state.current = state.model.model
+        self.model_state.default = state.model.default_model
+        if self.thread_id != previous_thread or self.agent_state.current_id != previous_agent:
+            self.model_state.cache = None
+            self.model_state.loading = False
+        self._update_header()
+
+    def _apply_thread_state(self, state) -> None:
+        self._apply_thread_selection(state)
+        self._hydrate_ui_messages(state.messages)
+
     async def _thread_exists(self, thread_id: str) -> bool:
         return thread_id in await self.client.list_threads(self.session_id)
 
@@ -663,10 +673,9 @@ class AgentApp(App):
         self.agent_state.current_id = None
         self.agent_state.current_name = None
         self._update_header()
-        await self._refresh_agent()
         try:
-            payload = await self.client.get_thread_messages(self.session_id, thread_id)
-            self._hydrate_ui_messages(payload.messages)
+            state = await self.client.get_thread_state(self.session_id, thread_id)
+            self._apply_thread_state(state)
         except Exception as exc:
             self._add_system_message(f"Failed to load history: {exc}")
             return

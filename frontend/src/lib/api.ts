@@ -9,14 +9,6 @@ export const SERVER_URL =
   (import.meta.env.VITE_LATTICE_SERVER_URL as string | undefined) ||
   DEFAULT_SERVER_URL;
 
-function resolveSessionId(data: Record<string, unknown>): string {
-  const sessionId = data.session_id ?? data.sessionId;
-  if (typeof sessionId !== "string" || !sessionId) {
-    throw new Error("Server did not return a session id.");
-  }
-  return sessionId;
-}
-
 async function ensureOk(response: Response, fallbackMessage: string) {
   if (response.ok) {
     return;
@@ -31,15 +23,81 @@ async function ensureOk(response: Response, fallbackMessage: string) {
   throw new Error(`${fallbackMessage}.${detail}`);
 }
 
-export async function getSessionId(): Promise<string> {
-  const response = await fetch(`${SERVER_URL}/session`);
-  await ensureOk(response, "Failed to load session");
-  const data = (await response.json()) as Record<string, unknown>;
-  return resolveSessionId(data);
+export type AgentSelection = {
+  agent: string;
+  defaultAgent: string;
+  isDefault: boolean;
+  agentName: string;
+};
+
+export type ModelSelection = {
+  model: string;
+  defaultModel: string;
+  isDefault: boolean;
+};
+
+export type ThreadState = {
+  threadId: string;
+  agent: AgentSelection;
+  model: ModelSelection;
+  messages: UiMessage[];
+};
+
+export type SessionBootstrap = {
+  sessionId: string;
+  threadId: string;
+  threads: string[];
+  agent: AgentSelection;
+  model: ModelSelection;
+  messages: UiMessage[];
+};
+
+export type ThreadStateUpdate = {
+  agent?: string | null;
+  model?: string | null;
+};
+
+function mapAgentSelection(
+  data: components["schemas"]["ThreadAgentResponse"]
+): AgentSelection {
+  return {
+    agent: data.agent ?? "",
+    defaultAgent: data.default_agent ?? "",
+    isDefault: Boolean(data.is_default),
+    agentName: data.agent_name ?? ""
+  };
 }
 
-export async function listModels(): Promise<{ defaultModel: string; models: string[] }> {
-  const response = await fetch(`${SERVER_URL}/models`);
+function mapModelSelection(
+  data: components["schemas"]["SessionModelResponse"]
+): ModelSelection {
+  return {
+    model: data.model ?? "",
+    defaultModel: data.default_model ?? "",
+    isDefault: Boolean(data.is_default)
+  };
+}
+
+function mapThreadState(
+  data: components["schemas"]["ThreadStateResponse"],
+  fallbackThreadId: string
+): ThreadState {
+  const messages = (data.messages ?? []) as UiMessage[];
+  return {
+    threadId: data.thread_id ?? fallbackThreadId,
+    agent: mapAgentSelection(data.agent),
+    model: mapModelSelection(data.model),
+    messages
+  };
+}
+
+export async function listThreadModels(
+  sessionId: string,
+  threadId: string
+): Promise<{ defaultModel: string; models: string[] }> {
+  const response = await fetch(
+    `${SERVER_URL}/sessions/${sessionId}/threads/${threadId}/models`
+  );
   await ensureOk(response, "Failed to load models");
   const data = (await response.json()) as components["schemas"]["ModelListResponse"];
   return {
@@ -58,81 +116,6 @@ export async function listAgents(): Promise<{ defaultAgent: string; agents: Agen
   return {
     defaultAgent: data.default_agent ?? "",
     agents: agents.filter((item) => Boolean(item.id))
-  };
-}
-
-export async function getThreadAgent(
-  sessionId: string,
-  threadId: string
-): Promise<{ agent: string; defaultAgent: string; isDefault: boolean; agentName: string }> {
-  const response = await fetch(
-    `${SERVER_URL}/sessions/${sessionId}/threads/${threadId}/agent`
-  );
-  await ensureOk(response, "Failed to load agent");
-  const data = (await response.json()) as components["schemas"]["ThreadAgentResponse"];
-  return {
-    agent: data.agent ?? "",
-    defaultAgent: data.default_agent ?? "",
-    isDefault: Boolean(data.is_default),
-    agentName: data.agent_name ?? ""
-  };
-}
-
-export async function setThreadAgent(
-  sessionId: string,
-  threadId: string,
-  agent: string | null
-): Promise<{ agent: string; defaultAgent: string; isDefault: boolean; agentName: string }> {
-  const response = await fetch(
-    `${SERVER_URL}/sessions/${sessionId}/threads/${threadId}/agent`,
-    {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(agent ? { agent } : {})
-    }
-  );
-  await ensureOk(response, "Failed to set agent");
-  const data = (await response.json()) as components["schemas"]["ThreadAgentResponse"];
-  return {
-    agent: data.agent ?? "",
-    defaultAgent: data.default_agent ?? "",
-    isDefault: Boolean(data.is_default),
-    agentName: data.agent_name ?? ""
-  };
-}
-
-export async function getSessionModel(
-  sessionId: string
-): Promise<{ model: string; defaultModel: string; isDefault: boolean }> {
-  const response = await fetch(`${SERVER_URL}/sessions/${sessionId}/model`);
-  await ensureOk(response, "Failed to load model");
-  const data = (await response.json()) as components["schemas"]["SessionModelResponse"];
-  return {
-    model: data.model ?? "",
-    defaultModel: data.default_model ?? "",
-    isDefault: Boolean(data.is_default)
-  };
-}
-
-export async function setSessionModel(
-  sessionId: string,
-  model: string | null
-): Promise<{ model: string; defaultModel: string; isDefault: boolean }> {
-  const response = await fetch(`${SERVER_URL}/sessions/${sessionId}/model`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(model ? { model } : {})
-  });
-  await ensureOk(response, "Failed to set model");
-  const data = (await response.json()) as components["schemas"]["SessionModelResponse"];
-  return {
-    model: data.model ?? "",
-    defaultModel: data.default_model ?? "",
-    isDefault: Boolean(data.is_default)
   };
 }
 
@@ -179,16 +162,64 @@ export async function clearThread(sessionId: string, threadId: string): Promise<
   return data.cleared ?? threadId;
 }
 
-export async function getThreadMessages(
+export async function getThreadState(
   sessionId: string,
   threadId: string
-): Promise<UiMessage[]> {
+): Promise<ThreadState> {
   const response = await fetch(
-    `${SERVER_URL}/sessions/${sessionId}/threads/${threadId}/messages`
+    `${SERVER_URL}/sessions/${sessionId}/threads/${threadId}/state`
   );
-  await ensureOk(response, "Failed to load thread messages");
-  const data = (await response.json()) as { messages?: UiMessage[] };
-  return data.messages ?? [];
+  await ensureOk(response, "Failed to load thread state");
+  const data = (await response.json()) as components["schemas"]["ThreadStateResponse"];
+  return mapThreadState(data, threadId);
+}
+
+export async function updateThreadState(
+  sessionId: string,
+  threadId: string,
+  update: ThreadStateUpdate
+): Promise<ThreadState> {
+  const payload: Record<string, string | null> = {};
+  if (update.agent !== undefined) {
+    payload.agent = update.agent;
+  }
+  if (update.model !== undefined) {
+    payload.model = update.model;
+  }
+  const response = await fetch(
+    `${SERVER_URL}/sessions/${sessionId}/threads/${threadId}/state`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    }
+  );
+  await ensureOk(response, "Failed to update thread state");
+  const data = (await response.json()) as components["schemas"]["ThreadStateResponse"];
+  return mapThreadState(data, threadId);
+}
+
+export async function bootstrapSession(threadId?: string): Promise<SessionBootstrap> {
+  const url = threadId
+    ? `${SERVER_URL}/session/bootstrap?thread_id=${encodeURIComponent(threadId)}`
+    : `${SERVER_URL}/session/bootstrap`;
+  const response = await fetch(url);
+  await ensureOk(response, "Failed to bootstrap session");
+  const data = (await response.json()) as components["schemas"]["SessionBootstrapResponse"];
+  const mapped = mapThreadState(
+    data as components["schemas"]["ThreadStateResponse"],
+    data.thread_id ?? ""
+  );
+  return {
+    sessionId: data.session_id ?? "",
+    threadId: mapped.threadId,
+    threads: data.threads ?? [],
+    agent: mapped.agent,
+    model: mapped.model,
+    messages: mapped.messages
+  };
 }
 
 export async function runChatStream(

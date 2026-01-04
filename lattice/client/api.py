@@ -11,17 +11,16 @@ from lattice.protocol.models import (
     AgentListResponse,
     ModelListResponse,
     ServerInfoResponse,
-    ThreadAgentRequest,
-    ThreadAgentResponse,
-    SessionModelRequest,
-    SessionModelResponse,
     ThreadClearResponse,
     ThreadCreateRequest,
     ThreadCreateResponse,
     ThreadDeleteResponse,
     ThreadListResponse,
-    ThreadMessagesResponse,
+    ThreadStateResponse,
+    SessionBootstrapResponse,
 )
+
+_UNSET = object()
 
 
 class AgentClient:
@@ -94,22 +93,19 @@ class AgentClient:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def get_session_id(self) -> str:
-        response = await self._client.get("/session")
-        self._raise_for_status(response, "Failed to load session")
-        data = response.json()
-        session_id = data.get("session_id") or data.get("sessionId")
-        if not session_id:
-            raise ValueError("Server did not return a session id.")
-        return session_id
+    async def bootstrap_session(self, thread_id: str | None = None) -> SessionBootstrapResponse:
+        params = {"thread_id": thread_id} if thread_id else None
+        response = await self._client.get("/session/bootstrap", params=params)
+        self._raise_for_status(response, "Failed to bootstrap session")
+        return SessionBootstrapResponse.model_validate(response.json())
 
     async def get_server_info(self) -> ServerInfoResponse:
         response = await self._client.get("/info")
         self._raise_for_status(response, "Failed to load server info")
         return ServerInfoResponse.model_validate(response.json())
 
-    async def list_models(self) -> ModelListResponse:
-        response = await self._client.get("/models")
+    async def list_thread_models(self, session_id: str, thread_id: str) -> ModelListResponse:
+        response = await self._client.get(f"/sessions/{session_id}/threads/{thread_id}/models")
         self._raise_for_status(response, "Failed to load models")
         return ModelListResponse.model_validate(response.json())
 
@@ -117,36 +113,6 @@ class AgentClient:
         response = await self._client.get("/agents")
         self._raise_for_status(response, "Failed to load agents")
         return AgentListResponse.model_validate(response.json())
-
-    async def get_thread_agent(self, session_id: str, thread_id: str) -> ThreadAgentResponse:
-        response = await self._client.get(f"/sessions/{session_id}/threads/{thread_id}/agent")
-        self._raise_for_status(response, "Failed to load agent")
-        return ThreadAgentResponse.model_validate(response.json())
-
-    async def set_thread_agent(
-        self, session_id: str, thread_id: str, agent: str | None
-    ) -> ThreadAgentResponse:
-        payload = ThreadAgentRequest(agent=agent)
-        response = await self._client.put(
-            f"/sessions/{session_id}/threads/{thread_id}/agent",
-            json=payload.model_dump(mode="json", exclude_none=True),
-        )
-        self._raise_for_status(response, "Failed to set agent")
-        return ThreadAgentResponse.model_validate(response.json())
-
-    async def get_session_model(self, session_id: str) -> SessionModelResponse:
-        response = await self._client.get(f"/sessions/{session_id}/model")
-        self._raise_for_status(response, "Failed to load model")
-        return SessionModelResponse.model_validate(response.json())
-
-    async def set_session_model(self, session_id: str, model: str | None) -> SessionModelResponse:
-        payload = SessionModelRequest(model=model)
-        response = await self._client.put(
-            f"/sessions/{session_id}/model",
-            json=payload.model_dump(mode="json", exclude_none=True),
-        )
-        self._raise_for_status(response, "Failed to set model")
-        return SessionModelResponse.model_validate(response.json())
 
     async def list_threads(self, session_id: str) -> list[str]:
         response = await self._client.get(f"/sessions/{session_id}/threads")
@@ -176,10 +142,30 @@ class AgentClient:
         data = ThreadClearResponse.model_validate(response.json())
         return data.cleared
 
-    async def get_thread_messages(self, session_id: str, thread_id: str) -> ThreadMessagesResponse:
-        response = await self._client.get(f"/sessions/{session_id}/threads/{thread_id}/messages")
-        self._raise_for_status(response, "Failed to load messages")
-        return ThreadMessagesResponse.model_validate(response.json())
+    async def get_thread_state(self, session_id: str, thread_id: str) -> ThreadStateResponse:
+        response = await self._client.get(f"/sessions/{session_id}/threads/{thread_id}/state")
+        self._raise_for_status(response, "Failed to load thread state")
+        return ThreadStateResponse.model_validate(response.json())
+
+    async def update_thread_state(
+        self,
+        session_id: str,
+        thread_id: str,
+        *,
+        agent: str | None | object = _UNSET,
+        model: str | None | object = _UNSET,
+    ) -> ThreadStateResponse:
+        payload: dict[str, object] = {}
+        if agent is not _UNSET:
+            payload["agent"] = agent
+        if model is not _UNSET:
+            payload["model"] = model
+        response = await self._client.patch(
+            f"/sessions/{session_id}/threads/{thread_id}/state",
+            json=payload,
+        )
+        self._raise_for_status(response, "Failed to update thread state")
+        return ThreadStateResponse.model_validate(response.json())
 
     async def run_stream(self, run_input: RequestData) -> AsyncIterator[dict]:
         payload = run_input.model_dump(mode="json", by_alias=True, exclude_none=True)

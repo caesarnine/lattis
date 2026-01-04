@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic_ai.ui.vercel_ai import VercelAIAdapter
-
+from pydantic_ai.exceptions import UserError
 from lattice.core.session import generate_thread_id
-from lattice.core.threads import create_thread, delete_thread, list_threads, load_thread_messages
+from lattice.core.threads import create_thread, delete_thread, list_threads
 from lattice.protocol.models import (
     ThreadClearResponse,
     ThreadCreateRequest,
     ThreadCreateResponse,
     ThreadDeleteResponse,
     ThreadListResponse,
-    ThreadMessagesResponse,
+    ThreadStateResponse,
+    ThreadStateUpdateRequest,
 )
 from lattice.server.context import AppContext
 from lattice.server.deps import get_ctx
+from lattice.server.services.agents import select_agent_for_thread, set_thread_agent
+from lattice.server.services.models import set_session_model
+from lattice.server.services.state import build_thread_state
 
 router = APIRouter()
 
@@ -68,16 +71,54 @@ async def api_clear_thread(
 
 
 @router.get(
-    "/sessions/{session_id}/threads/{thread_id}/messages",
-    response_model=ThreadMessagesResponse,
+    "/sessions/{session_id}/threads/{thread_id}/state",
+    response_model=ThreadStateResponse,
 )
-async def api_thread_messages(
+async def api_thread_state(
     session_id: str,
     thread_id: str,
     ctx: AppContext = Depends(get_ctx),
-) -> ThreadMessagesResponse:
-    messages = load_thread_messages(
-        ctx.store, session_id=session_id, thread_id=thread_id, workspace=ctx.workspace
-    )
-    ui_messages = VercelAIAdapter.dump_messages(messages)
-    return ThreadMessagesResponse(messages=ui_messages)
+) -> ThreadStateResponse:
+    if thread_id not in list_threads(ctx.store, session_id):
+        raise HTTPException(status_code=404, detail="Thread not found.")
+    return build_thread_state(ctx, session_id=session_id, thread_id=thread_id)
+
+
+@router.patch(
+    "/sessions/{session_id}/threads/{thread_id}/state",
+    response_model=ThreadStateResponse,
+)
+async def api_update_thread_state(
+    session_id: str,
+    thread_id: str,
+    payload: ThreadStateUpdateRequest,
+    ctx: AppContext = Depends(get_ctx),
+) -> ThreadStateResponse:
+    if thread_id not in list_threads(ctx.store, session_id):
+        raise HTTPException(status_code=404, detail="Thread not found.")
+
+    selection = select_agent_for_thread(ctx, session_id=session_id, thread_id=thread_id)
+
+    if "agent" in payload.model_fields_set:
+        try:
+            selection = set_thread_agent(
+                ctx,
+                session_id=session_id,
+                thread_id=thread_id,
+                requested=payload.agent,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if "model" in payload.model_fields_set:
+        try:
+            set_session_model(
+                ctx,
+                session_id=session_id,
+                plugin=selection.plugin,
+                requested=payload.model,
+            )
+        except UserError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return build_thread_state(ctx, session_id=session_id, thread_id=thread_id)

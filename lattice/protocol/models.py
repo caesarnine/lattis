@@ -25,11 +25,6 @@ class ThreadClearResponse(BaseModel):
 class ThreadListResponse(BaseModel):
     threads: list[str]
 
-
-class ThreadMessagesResponse(BaseModel):
-    messages: list[UIMessage]
-
-
 class ModelListResponse(BaseModel):
     default_model: str
     models: list[str]
@@ -45,10 +40,6 @@ class AgentListResponse(BaseModel):
     agents: list[AgentInfo]
 
 
-class ThreadAgentRequest(BaseModel):
-    agent: str | None = None
-
-
 class ThreadAgentResponse(BaseModel):
     agent: str
     default_agent: str
@@ -56,14 +47,31 @@ class ThreadAgentResponse(BaseModel):
     agent_name: str | None = None
 
 
-class SessionModelRequest(BaseModel):
-    model: str | None = None
-
-
 class SessionModelResponse(BaseModel):
     model: str
     default_model: str
     is_default: bool
+
+
+class ThreadStateUpdateRequest(BaseModel):
+    agent: str | None = None
+    model: str | None = None
+
+
+class ThreadStateResponse(BaseModel):
+    thread_id: str
+    agent: ThreadAgentResponse
+    model: SessionModelResponse
+    messages: list[UIMessage]
+
+
+class SessionBootstrapResponse(BaseModel):
+    session_id: str
+    thread_id: str
+    threads: list[str]
+    agent: ThreadAgentResponse
+    model: SessionModelResponse
+    messages: list[UIMessage]
 
 
 class ServerInfoResponse(BaseModel):

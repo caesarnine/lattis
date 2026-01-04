@@ -17,19 +17,9 @@ export interface paths {
     /** Info */
     get: operations["info_info_get"];
   };
-  "/models": {
-    /** Api List Models */
-    get: operations["api_list_models_models_get"];
-  };
-  "/session": {
-    /** Api Session */
-    get: operations["api_session_session_get"];
-  };
-  "/sessions/{session_id}/model": {
-    /** Api Get Session Model */
-    get: operations["api_get_session_model_sessions__session_id__model_get"];
-    /** Api Set Session Model */
-    put: operations["api_set_session_model_sessions__session_id__model_put"];
+  "/session/bootstrap": {
+    /** Api Session Bootstrap */
+    get: operations["api_session_bootstrap_session_bootstrap_get"];
   };
   "/sessions/{session_id}/threads": {
     /** Api List Threads */
@@ -41,19 +31,19 @@ export interface paths {
     /** Api Delete Thread */
     delete: operations["api_delete_thread_sessions__session_id__threads__thread_id__delete"];
   };
-  "/sessions/{session_id}/threads/{thread_id}/agent": {
-    /** Api Get Thread Agent */
-    get: operations["api_get_thread_agent_sessions__session_id__threads__thread_id__agent_get"];
-    /** Api Set Thread Agent */
-    put: operations["api_set_thread_agent_sessions__session_id__threads__thread_id__agent_put"];
-  };
   "/sessions/{session_id}/threads/{thread_id}/clear": {
     /** Api Clear Thread */
     post: operations["api_clear_thread_sessions__session_id__threads__thread_id__clear_post"];
   };
-  "/sessions/{session_id}/threads/{thread_id}/messages": {
-    /** Api Thread Messages */
-    get: operations["api_thread_messages_sessions__session_id__threads__thread_id__messages_get"];
+  "/sessions/{session_id}/threads/{thread_id}/models": {
+    /** Api List Thread Models */
+    get: operations["api_list_thread_models_sessions__session_id__threads__thread_id__models_get"];
+  };
+  "/sessions/{session_id}/threads/{thread_id}/state": {
+    /** Api Thread State */
+    get: operations["api_thread_state_sessions__session_id__threads__thread_id__state_get"];
+    /** Api Update Thread State */
+    patch: operations["api_update_thread_state_sessions__session_id__threads__thread_id__state_patch"];
   };
   "/ui/chat": {
     /** Ui Chat */
@@ -289,10 +279,18 @@ export interface components {
        */
       workspace_mode: "central" | "local";
     };
-    /** SessionModelRequest */
-    SessionModelRequest: {
-      /** Model */
-      model?: string | null;
+    /** SessionBootstrapResponse */
+    SessionBootstrapResponse: {
+      agent: components["schemas"]["ThreadAgentResponse"];
+      /** Messages */
+      messages: components["schemas"]["UIMessage"][];
+      model: components["schemas"]["SessionModelResponse"];
+      /** Session Id */
+      session_id: string;
+      /** Thread Id */
+      thread_id: string;
+      /** Threads */
+      threads: string[];
     };
     /** SessionModelResponse */
     SessionModelResponse: {
@@ -387,11 +385,6 @@ export interface components {
        */
       type?: "text";
     };
-    /** ThreadAgentRequest */
-    ThreadAgentRequest: {
-      /** Agent */
-      agent?: string | null;
-    };
     /** ThreadAgentResponse */
     ThreadAgentResponse: {
       /** Agent */
@@ -428,10 +421,21 @@ export interface components {
       /** Threads */
       threads: string[];
     };
-    /** ThreadMessagesResponse */
-    ThreadMessagesResponse: {
+    /** ThreadStateResponse */
+    ThreadStateResponse: {
+      agent: components["schemas"]["ThreadAgentResponse"];
       /** Messages */
       messages: components["schemas"]["UIMessage"][];
+      model: components["schemas"]["SessionModelResponse"];
+      /** Thread Id */
+      thread_id: string;
+    };
+    /** ThreadStateUpdateRequest */
+    ThreadStateUpdateRequest: {
+      /** Agent */
+      agent?: string | null;
+      /** Model */
+      model?: string | null;
     };
     /**
      * ToolInputAvailablePart
@@ -614,69 +618,18 @@ export interface operations {
       };
     };
   };
-  /** Api List Models */
-  api_list_models_models_get: {
-    responses: {
-      /** @description Successful Response */
-      200: {
-        content: {
-          "application/json": components["schemas"]["ModelListResponse"];
-        };
-      };
-    };
-  };
-  /** Api Session */
-  api_session_session_get: {
-    responses: {
-      /** @description Successful Response */
-      200: {
-        content: {
-          "application/json": {
-            [key: string]: string;
-          };
-        };
-      };
-    };
-  };
-  /** Api Get Session Model */
-  api_get_session_model_sessions__session_id__model_get: {
+  /** Api Session Bootstrap */
+  api_session_bootstrap_session_bootstrap_get: {
     parameters: {
-      path: {
-        session_id: string;
+      query?: {
+        thread_id?: string | null;
       };
     };
     responses: {
       /** @description Successful Response */
       200: {
         content: {
-          "application/json": components["schemas"]["SessionModelResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  /** Api Set Session Model */
-  api_set_session_model_sessions__session_id__model_put: {
-    parameters: {
-      path: {
-        session_id: string;
-      };
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["SessionModelRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        content: {
-          "application/json": components["schemas"]["SessionModelResponse"];
+          "application/json": components["schemas"]["SessionBootstrapResponse"];
         };
       };
       /** @description Validation Error */
@@ -759,57 +712,6 @@ export interface operations {
       };
     };
   };
-  /** Api Get Thread Agent */
-  api_get_thread_agent_sessions__session_id__threads__thread_id__agent_get: {
-    parameters: {
-      path: {
-        session_id: string;
-        thread_id: string;
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        content: {
-          "application/json": components["schemas"]["ThreadAgentResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  /** Api Set Thread Agent */
-  api_set_thread_agent_sessions__session_id__threads__thread_id__agent_put: {
-    parameters: {
-      path: {
-        session_id: string;
-        thread_id: string;
-      };
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["ThreadAgentRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        content: {
-          "application/json": components["schemas"]["ThreadAgentResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
   /** Api Clear Thread */
   api_clear_thread_sessions__session_id__threads__thread_id__clear_post: {
     parameters: {
@@ -833,8 +735,8 @@ export interface operations {
       };
     };
   };
-  /** Api Thread Messages */
-  api_thread_messages_sessions__session_id__threads__thread_id__messages_get: {
+  /** Api List Thread Models */
+  api_list_thread_models_sessions__session_id__threads__thread_id__models_get: {
     parameters: {
       path: {
         session_id: string;
@@ -845,7 +747,58 @@ export interface operations {
       /** @description Successful Response */
       200: {
         content: {
-          "application/json": components["schemas"]["ThreadMessagesResponse"];
+          "application/json": components["schemas"]["ModelListResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Thread State */
+  api_thread_state_sessions__session_id__threads__thread_id__state_get: {
+    parameters: {
+      path: {
+        session_id: string;
+        thread_id: string;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["ThreadStateResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Update Thread State */
+  api_update_thread_state_sessions__session_id__threads__thread_id__state_patch: {
+    parameters: {
+      path: {
+        session_id: string;
+        thread_id: string;
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ThreadStateUpdateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["ThreadStateResponse"];
         };
       };
       /** @description Validation Error */

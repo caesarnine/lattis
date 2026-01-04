@@ -12,17 +12,14 @@ import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import {
   SERVER_URL,
+  bootstrapSession,
   createThread,
-  getThreadAgent,
-  getSessionModel,
-  getSessionId,
+  getThreadState,
   listAgents,
-  listModels,
+  listThreadModels,
   listThreads,
-  getThreadMessages,
   runChatStream,
-  setThreadAgent,
-  setSessionModel,
+  updateThreadState,
   type AgentInfo
 } from "@/lib/api";
 import { createId } from "@/lib/ids";
@@ -90,12 +87,18 @@ export default function App() {
     []
   );
 
-  const loadThreadHistory = React.useCallback(
+  const loadThreadState = React.useCallback(
     async (session: string, threadId: string) => {
       setIsLoadingHistory(true);
       try {
-        const messages = await getThreadMessages(session, threadId);
-        hydrateUiMessages(messages);
+        const state = await getThreadState(session, threadId);
+        setAgent(state.agent.agent);
+        setAgentName(state.agent.agentName || null);
+        setDefaultAgent(state.agent.defaultAgent);
+        setModel(state.model.model);
+        setDefaultModel(state.model.defaultModel);
+        setModels(null);
+        hydrateUiMessages(state.messages);
       } catch (error) {
         addMessage({
           id: createId("history-error"),
@@ -110,19 +113,6 @@ export default function App() {
     },
     [addMessage, hydrateUiMessages]
   );
-
-  const loadThreadAgent = React.useCallback(async (session: string, threadId: string) => {
-    const payload = await getThreadAgent(session, threadId);
-    setAgent(payload.agent);
-    setAgentName(payload.agentName || null);
-    setDefaultAgent(payload.defaultAgent);
-  }, []);
-
-  const loadSessionModel = React.useCallback(async (session: string) => {
-    const payload = await getSessionModel(session);
-    setModel(payload.model);
-    setDefaultModel(payload.defaultModel);
-  }, []);
 
   const loadAgents = React.useCallback(async () => {
     if (agents && agents.length) {
@@ -139,47 +129,58 @@ export default function App() {
   }, [agents]);
 
   const loadModels = React.useCallback(async () => {
-    if (models && models.length) {
+    if (!sessionId || !currentThread) {
+      return;
+    }
+    if (models !== null) {
       return;
     }
     setIsLoadingModels(true);
     try {
-      const payload = await listModels();
+      const payload = await listThreadModels(sessionId, currentThread);
       setModels(payload.models);
-      setDefaultModel((prev) => prev ?? payload.defaultModel);
+      setDefaultModel(payload.defaultModel);
     } finally {
       setIsLoadingModels(false);
     }
-  }, [models]);
+  }, [currentThread, models, sessionId]);
 
   const handleSelectAgent = React.useCallback(
     async (nextAgent: string | null) => {
       if (!sessionId || !currentThread) return;
       try {
-        const payload = await setThreadAgent(sessionId, currentThread, nextAgent);
-        setAgent(payload.agent);
-        setAgentName(payload.agentName || null);
-        setDefaultAgent(payload.defaultAgent);
-        setStatusMessage(payload.isDefault ? "Agent reset to default." : "Agent updated.");
+        const state = await updateThreadState(sessionId, currentThread, { agent: nextAgent });
+        setAgent(state.agent.agent);
+        setAgentName(state.agent.agentName || null);
+        setDefaultAgent(state.agent.defaultAgent);
+        setModel(state.model.model);
+        setDefaultModel(state.model.defaultModel);
+        setModels(null);
+        setStatusMessage(
+          state.agent.isDefault ? "Agent reset to default." : "Agent updated."
+        );
         setTimeout(() => setStatusMessage(null), 2000);
-        await loadSessionModel(sessionId);
       } catch (error) {
         setStatusMessage(
           error instanceof Error ? error.message : "Failed to update agent"
         );
       }
     },
-    [currentThread, loadSessionModel, sessionId]
+    [currentThread, sessionId]
   );
 
   const handleSelectModel = React.useCallback(
     async (nextModel: string | null) => {
-      if (!sessionId) return;
+      if (!sessionId || !currentThread) return;
       try {
-        const payload = await setSessionModel(sessionId, nextModel);
-        setModel(payload.model);
-        setDefaultModel(payload.defaultModel);
-        setStatusMessage(payload.isDefault ? "Model reset to default." : "Model updated.");
+        const state = await updateThreadState(sessionId, currentThread, {
+          model: nextModel
+        });
+        setModel(state.model.model);
+        setDefaultModel(state.model.defaultModel);
+        setStatusMessage(
+          state.model.isDefault ? "Model reset to default." : "Model updated."
+        );
         setTimeout(() => setStatusMessage(null), 2000);
       } catch (error) {
         setStatusMessage(
@@ -187,7 +188,7 @@ export default function App() {
         );
       }
     },
-    [sessionId]
+    [currentThread, sessionId]
   );
 
   React.useEffect(() => {
@@ -196,20 +197,17 @@ export default function App() {
     const init = async () => {
       try {
         setStatusMessage("Connecting to server...");
-        const session = await getSessionId();
+        const bootstrap = await bootstrapSession();
         if (!active) return;
-        setSessionId(session);
-        await loadSessionModel(session);
-        const list = await loadThreads(session);
-        let threadId = list[0];
-        if (!threadId) {
-          threadId = await createThread(session);
-          setThreads([threadId]);
-        }
-        if (!active) return;
-        setCurrentThread(threadId);
-        await loadThreadAgent(session, threadId);
-        await loadThreadHistory(session, threadId);
+        setSessionId(bootstrap.sessionId);
+        setThreads(bootstrap.threads);
+        setCurrentThread(bootstrap.threadId);
+        setAgent(bootstrap.agent.agent);
+        setAgentName(bootstrap.agent.agentName || null);
+        setDefaultAgent(bootstrap.agent.defaultAgent);
+        setModel(bootstrap.model.model);
+        setDefaultModel(bootstrap.model.defaultModel);
+        hydrateUiMessages(bootstrap.messages);
         setStatusMessage(null);
       } catch (error) {
         if (!active) return;
@@ -225,7 +223,7 @@ export default function App() {
       active = false;
       runAbort.current?.abort();
     };
-  }, [loadSessionModel, loadThreadAgent, loadThreadHistory, loadThreads]);
+  }, [hydrateUiMessages]);
 
   const handleSelectThread = async (threadId: string) => {
     if (!sessionId) return;
@@ -236,8 +234,7 @@ export default function App() {
     runAbort.current?.abort();
     setIsThreadPanelOpen(false);
     setCurrentThread(threadId);
-    await loadThreadAgent(sessionId, threadId);
-    await loadThreadHistory(sessionId, threadId);
+    await loadThreadState(sessionId, threadId);
   };
 
   const handleCreateThread = async () => {
@@ -247,8 +244,7 @@ export default function App() {
       setThreads((prev) => [newThread, ...prev]);
       setCurrentThread(newThread);
       setIsThreadPanelOpen(false);
-      await loadThreadAgent(sessionId, newThread);
-      await loadThreadHistory(sessionId, newThread);
+      await loadThreadState(sessionId, newThread);
     } catch (error) {
       setStatusMessage(
         error instanceof Error ? error.message : "Failed to create thread"
