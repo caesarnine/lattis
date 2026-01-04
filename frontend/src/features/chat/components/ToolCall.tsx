@@ -2,8 +2,9 @@ import React from "react";
 import { ChevronDown, ChevronRight, Terminal } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
-import { cn } from "@/lib/utils";
-import { formatArgsPreview, isBashTool, type ToolResult } from "@/lib/format";
+import { formatArgsPreview, isBashTool } from "@/features/chat/format";
+import { type ToolResult } from "@/features/chat/types";
+import { cn } from "@/shared/utils";
 
 export type ToolCallProps = {
   toolName: string;

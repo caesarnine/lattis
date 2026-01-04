@@ -2,8 +2,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { motion } from "framer-motion";
 
-import { cn } from "@/lib/utils";
-import { type ChatRole } from "@/lib/chat";
+import { cn } from "@/shared/utils";
+import { type ChatRole } from "@/features/chat/types";
 
 const ROLE_LABELS: Record<string, string> = {
   user: "You",

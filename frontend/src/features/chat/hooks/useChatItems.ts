@@ -1,9 +1,9 @@
 import React from "react";
 
-import { appendToolArgs, parseToolResult, type ToolResult } from "@/lib/format";
-import { createId } from "@/lib/ids";
-import { type ChatRole } from "@/lib/chat";
-import { type UiMessage, type UiMessagePart, type UiStreamEvent } from "@/lib/vercel";
+import { appendToolArgs, parseToolResult } from "@/features/chat/format";
+import { type ChatRole, type MessageItem, type RenderItem, type ToolItem } from "@/features/chat/types";
+import { createId } from "@/shared/ids";
+import { type UiMessage, type UiMessagePart, type UiStreamEvent } from "@/services/vercel";
 
 const EMPTY_MESSAGE = "";
 
@@ -11,23 +11,6 @@ type UiToolPart = Extract<
   UiMessagePart,
   { toolCallId: string; state: string; type: string }
 >;
-
-type MessageItem = {
-  kind: "message";
-  id: string;
-  role: ChatRole;
-  content: string;
-};
-
-type ToolItem = {
-  kind: "tool";
-  id: string;
-  toolName: string;
-  argsRaw: string;
-  result?: ToolResult;
-};
-
-export type RenderItem = MessageItem | ToolItem;
 
 type AddMessageInput = {
   id?: string;
@@ -82,15 +65,11 @@ export function useChatItems() {
   const messageIndex = React.useRef(new Map<string, number>());
   const toolIndex = React.useRef(new Map<string, number>());
 
-  const resetMaps = React.useCallback(() => {
+  const clearItems = React.useCallback(() => {
+    setItems([]);
     messageIndex.current = new Map();
     toolIndex.current = new Map();
   }, []);
-
-  const resetThreadState = React.useCallback(() => {
-    setItems([]);
-    resetMaps();
-  }, [resetMaps]);
 
   const addMessageItem = React.useCallback((message: MessageItem) => {
     setItems((prev) => {
@@ -111,6 +90,17 @@ export function useChatItems() {
       });
     },
     [addMessageItem]
+  );
+
+  const addSystemMessage = React.useCallback(
+    (content: string, id?: string) => {
+      addMessage({
+        id: id ?? createId("system"),
+        role: "system",
+        content
+      });
+    },
+    [addMessage]
   );
 
   const updateMessageContent = React.useCallback(
@@ -309,23 +299,27 @@ export function useChatItems() {
             typeof event.errorText === "string" && event.errorText
               ? event.errorText
               : "Unknown error";
-          addMessage({
-            id: createId("error"),
-            role: "system",
-            content: `Run error: ${errorText}`
-          });
+          addSystemMessage(`Run error: ${errorText}`, createId("error"));
           return;
         }
         default:
           return;
       }
     },
-    [addMessage, ensureToolItem, setToolArgs, setToolResult, updateMessageContent, updateToolItem]
+    [
+      addMessage,
+      addSystemMessage,
+      ensureToolItem,
+      setToolArgs,
+      setToolResult,
+      updateMessageContent,
+      updateToolItem
+    ]
   );
 
   const hydrateUiMessages = React.useCallback(
     (messages: UiMessage[]) => {
-      resetThreadState();
+      clearItems();
 
       const collectText = (parts: UiMessagePart[]) => {
         const chunks: string[] = [];
@@ -435,14 +429,14 @@ export function useChatItems() {
         flushBuffer();
       }
     },
-    [addMessage, ensureToolItem, resetThreadState, setToolArgs, setToolResult]
+    [addMessage, clearItems, ensureToolItem, setToolArgs, setToolResult]
   );
 
   return {
     items,
     addMessage,
+    addSystemMessage,
     handleStreamEvent,
-    hydrateUiMessages,
-    resetMaps
+    hydrateUiMessages
   };
 }

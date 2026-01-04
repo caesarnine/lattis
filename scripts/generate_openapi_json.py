@@ -5,7 +5,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from lattice.config import StorageConfig
+from lattice.settings.storage import StorageConfig
 from lattice.server.app import create_app
 
 

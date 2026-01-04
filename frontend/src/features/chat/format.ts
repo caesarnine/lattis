@@ -1,3 +1,5 @@
+import { type ToolResult } from "@/features/chat/types";
+
 const COMMAND_REGEX = /["']command["']\s*:\s*["']([^"']+)["']/;
 
 export function isBashTool(toolName: string) {
@@ -83,12 +85,6 @@ export function truncateOutput(output: string, limit = 4000) {
   }
   return `${output.slice(0, limit)}\n... (truncated, ${output.length - limit} chars)`;
 }
-
-export type ToolResult = {
-  output: string;
-  exitCode: number;
-  timedOut: boolean;
-};
 
 export function parseToolResult(content: unknown): ToolResult {
   let data: unknown = content;
