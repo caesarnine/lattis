@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from lattice.agents.plugin import AgentPlugin
-from lattice.domain.models import (
+from lattice.domain.model_selection import (
     resolve_default_model,
     select_session_model,
     set_session_model,

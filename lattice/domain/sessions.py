@@ -20,7 +20,6 @@ class ThreadSettings(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     agent: str | None = None
-    model: str | None = None
 
 
 class SessionStore(Protocol):

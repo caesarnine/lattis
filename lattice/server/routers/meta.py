@@ -5,13 +5,11 @@ import os
 
 from fastapi import APIRouter, Depends
 
-from lattice.domain.threads import create_thread, list_threads
-from lattice.protocol.models import ServerInfoResponse, SessionBootstrapResponse
-from lattice.server.context import AppContext
+from lattice.app.bootstrap import bootstrap_session
+from lattice.protocol.schemas import ServerInfoResponse, SessionBootstrapResponse
+from lattice.app.context import AppContext
 from lattice.server.deps import get_ctx
 from lattice.domain.agents import get_default_plugin
-from lattice.server.state import build_thread_state
-from lattice.settings.storage import load_or_create_session_id
 
 router = APIRouter()
 
@@ -44,30 +42,4 @@ async def api_session_bootstrap(
     thread_id: str | None = None,
     ctx: AppContext = Depends(get_ctx),
 ) -> SessionBootstrapResponse:
-    session_id = load_or_create_session_id(ctx.config.session_id_path)
-    threads = list_threads(ctx.store, session_id)
-
-    requested = (thread_id or "").strip()
-    if requested:
-        selected_thread = requested
-    elif threads:
-        selected_thread = threads[0]
-    else:
-        selected_thread = "default"
-
-    if selected_thread not in threads:
-        try:
-            create_thread(ctx.store, session_id=session_id, thread_id=selected_thread)
-        except ValueError:
-            pass
-        threads = list_threads(ctx.store, session_id)
-
-    state = build_thread_state(ctx, session_id=session_id, thread_id=selected_thread)
-    return SessionBootstrapResponse(
-        session_id=session_id,
-        thread_id=selected_thread,
-        threads=threads,
-        agent=state.agent,
-        model=state.model,
-        messages=state.messages,
-    )
+    return bootstrap_session(ctx, thread_id=thread_id)

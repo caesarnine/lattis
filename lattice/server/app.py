@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from lattice.agents.registry import AgentRegistry, load_registry
 from lattice.settings.storage import StorageConfig, load_storage_config
 from lattice.storage.sqlite import SQLiteSessionStore
-from lattice.server.context import AppContext
+from lattice.app.context import AppContext
 from lattice.server.routers import agents, meta, models, threads, ui
 from lattice.web import get_static_dir
 

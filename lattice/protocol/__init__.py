@@ -1,4 +1,4 @@
-from lattice.protocol.models import (
+from lattice.protocol.schemas import (
     AgentInfo,
     AgentListResponse,
     ModelListResponse,

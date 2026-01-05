@@ -10,10 +10,10 @@ from pydantic_ai.ui.vercel_ai.request_types import RequestData
 from lattice.agents.plugin import AgentRunContext
 from lattice.domain.messages import merge_messages
 from lattice.domain.threads import ThreadNotFoundError, load_thread_messages
-from lattice.server.context import AppContext
+from lattice.app.context import AppContext
 from lattice.server.deps import get_ctx
 from lattice.domain.agents import select_agent_for_thread
-from lattice.domain.models import select_session_model
+from lattice.domain.model_selection import select_session_model
 from lattice.server.ui_requests import (
     resolve_session_id_from_request,
     resolve_thread_id_from_request,

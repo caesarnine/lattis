@@ -10,9 +10,8 @@ from lattice.domain.threads import (
     create_thread,
     delete_thread,
     list_threads,
-    require_thread,
 )
-from lattice.protocol.models import (
+from lattice.protocol.schemas import (
     ThreadClearResponse,
     ThreadCreateRequest,
     ThreadCreateResponse,
@@ -21,11 +20,9 @@ from lattice.protocol.models import (
     ThreadStateResponse,
     ThreadStateUpdateRequest,
 )
-from lattice.server.context import AppContext
+from lattice.app.context import AppContext
+from lattice.app.thread_state import build_thread_state, update_thread_state
 from lattice.server.deps import get_ctx
-from lattice.domain.agents import select_agent_for_thread, set_thread_agent
-from lattice.domain.models import set_session_model
-from lattice.server.state import build_thread_state
 
 router = APIRouter()
 
@@ -106,36 +103,10 @@ async def api_update_thread_state(
     ctx: AppContext = Depends(get_ctx),
 ) -> ThreadStateResponse:
     try:
-        require_thread(ctx.store, session_id=session_id, thread_id=thread_id)
+        return update_thread_state(ctx, session_id=session_id, thread_id=thread_id, payload=payload)
     except ThreadNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    selection = select_agent_for_thread(ctx.store, ctx.registry, session_id=session_id, thread_id=thread_id)
-
-    if "agent" in payload.model_fields_set:
-        try:
-            selection = set_thread_agent(
-                ctx.store,
-                ctx.registry,
-                session_id=session_id,
-                thread_id=thread_id,
-                requested=payload.agent,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if "model" in payload.model_fields_set:
-        try:
-            set_session_model(
-                ctx.store,
-                session_id=session_id,
-                plugin=selection.plugin,
-                requested=payload.model,
-            )
-        except UserError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    try:
-        return build_thread_state(ctx, session_id=session_id, thread_id=thread_id)
-    except ThreadNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except UserError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

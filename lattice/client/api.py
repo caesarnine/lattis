@@ -7,7 +7,7 @@ import httpx
 from pydantic_ai.ui.vercel_ai.request_types import RequestData
 
 from lattice.client.streaming import iter_ui_events
-from lattice.protocol.models import (
+from lattice.protocol.schemas import (
     AgentListResponse,
     ModelListResponse,
     ServerInfoResponse,

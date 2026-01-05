@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from lattice.protocol.models import AgentInfo, AgentListResponse
-from lattice.server.context import AppContext
+from lattice.protocol.schemas import AgentInfo, AgentListResponse
+from lattice.app.context import AppContext
 from lattice.server.deps import get_ctx
 
 router = APIRouter()
