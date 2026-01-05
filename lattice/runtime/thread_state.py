@@ -5,8 +5,7 @@ from pydantic_ai.ui.vercel_ai import VercelAIAdapter
 from lattice.runtime.context import AppContext
 from lattice.domain.agents import select_agent_for_thread, set_thread_agent
 from lattice.domain.model_selection import (
-    list_models,
-    resolve_default_model,
+    build_model_list,
     select_session_model,
     set_session_model,
 )
@@ -85,5 +84,5 @@ def list_thread_models(
 ) -> ModelListResponse:
     require_thread(ctx.store, session_id=session_id, thread_id=thread_id)
     selection = select_agent_for_thread(ctx.store, ctx.registry, session_id=session_id, thread_id=thread_id)
-    default_model = resolve_default_model(selection.plugin)
-    return ModelListResponse(default_model=default_model, models=list_models(selection.plugin))
+    default_model, models = build_model_list(selection.plugin)
+    return ModelListResponse(default_model=default_model, models=models)

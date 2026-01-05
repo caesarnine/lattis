@@ -72,6 +72,23 @@ def test_select_session_model_prefers_store(store) -> None:
     assert selection.is_default is False
 
 
+def test_select_session_model_invalid_store_resets(store) -> None:
+    def validate_model(value: str) -> None:
+        if value != "valid-model":
+            raise ValueError("bad model")
+
+    plugin = _make_plugin(
+        default_model="valid-model",
+        list_models=lambda: ["valid-model"],
+        validate_model=validate_model,
+    )
+    store.set_session_model("s1", "bad-model")
+    selection = select_session_model(store, session_id="s1", plugin=plugin)
+    assert selection.model == "valid-model"
+    assert selection.is_default is True
+    assert store.get_session_model("s1") is None
+
+
 def test_set_session_model_resets_to_default(store) -> None:
     plugin = _make_plugin(default_model="default-model", list_models=lambda: ["default-model"])
     selection = set_session_model(store, session_id="s1", plugin=plugin, requested=None)
