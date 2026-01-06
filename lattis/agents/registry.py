@@ -13,7 +13,7 @@ from lattis.settings.env import AGENT_DEFAULT, AGENT_PLUGINS, read_env
 logger = logging.getLogger(__name__)
 
 AGENT_ENTRYPOINT_GROUP = "lattis.agents"
-DEFAULT_AGENT_ID = "binsmith"
+DEFAULT_AGENT_ID = "assistant"
 
 
 @dataclass(frozen=True)

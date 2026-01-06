@@ -13,7 +13,7 @@ Agents are loaded as plugins, and each thread can select a different agent.
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/)
-- Python 3.14+ (uv can install it automatically)
+- Python 3.12+ (uv can install it automatically)
 - An API key for at least one model provider (Gemini, Anthropic, OpenAI, etc.)
 
 ## Quick start
@@ -66,8 +66,12 @@ otherwise it runs in local (in-process) mode.
 
 Built-in agents:
 
-- `binsmith` — a script-building developer agent that can write reusable, composable tools
-- `poetry` — a simple example agent
+- `assistant` - a general-purpose default agent
+- `poetry` - a simple example agent
+
+Optional plugins:
+
+- `binsmith` - a toolkit-focused developer agent; install `binsmith` or run `uvx binsmith`
 
 ### Select an agent per thread
 
@@ -100,6 +104,29 @@ Your `plugin` can be:
 - a `pydantic_ai.Agent`, or
 - a callable that returns an `Agent` (optionally taking `model`).
 
+For frictionless integrations, export a `pydantic_ai.Agent` directly:
+
+```python
+from pydantic_ai import Agent
+
+plugin = Agent("google-gla:gemini-3-flash-preview")
+```
+
+If you need metadata or hooks, use the public plugin API:
+
+```python
+from lattis.plugins import AgentPlugin, list_known_models
+```
+
+Or use the helper to wrap an `Agent` or factory:
+
+```python
+from pydantic_ai import Agent
+from lattis.plugins import plugin_from
+
+plugin = plugin_from(Agent("google-gla:gemini-3-flash-preview"), id="my-agent", name="My Agent")
+```
+
 ## Storage
 
 Workspace modes:
@@ -120,7 +147,7 @@ Typical layout:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENT_DEFAULT` | `binsmith` | Default agent id/name (server + local mode) |
+| `AGENT_DEFAULT` | `assistant` | Default agent id/name (server + local mode) |
 | `AGENT_PLUGINS` | *(unset)* | Extra plugins (`module:attr`, comma-separated) |
 | `LATTIS_WORKSPACE_MODE` | `local` | `local` (per-project) or `central` (`~/.lattis`) |
 | `LATTIS_SERVER_URL` | *(unset)* | Server URL for clients that connect over HTTP |

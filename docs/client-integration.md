@@ -52,6 +52,6 @@ const state = await fetch(
 await fetch(`/sessions/${session_id}/threads/${thread_id}/state`, {
   method: "PATCH",
   headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ agent: "binsmith" })
+  body: JSON.stringify({ agent: "assistant" })
 });
 ```

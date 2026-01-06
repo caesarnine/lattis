@@ -13,7 +13,7 @@ from pydantic_ai.ui.vercel_ai.request_types import RequestData
 
 from lattis.settings.env import AGENT_PLUGIN, read_env
 
-DEFAULT_PLUGIN_SPEC = "lattis.agents.builtins.binsmith:plugin"
+DEFAULT_PLUGIN_SPEC = "lattis.agents.builtins.assistant:plugin"
 
 
 @dataclass(frozen=True)
