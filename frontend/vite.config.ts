@@ -15,6 +15,6 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    allowedHosts: ["binal-development"]
+    allowedHosts: ["binal"]
   }
 });

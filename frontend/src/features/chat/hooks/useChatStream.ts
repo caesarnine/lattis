@@ -63,8 +63,15 @@ export function useChatStream({
 }: UseChatStreamParams) {
   const [isStreaming, setIsStreaming] = React.useState(false);
   const abortRef = React.useRef<AbortController | null>(null);
+  const streamIdRef = React.useRef<string | null>(null);
+  const threadRef = React.useRef(threadId);
+
+  React.useEffect(() => {
+    threadRef.current = threadId;
+  }, [threadId]);
 
   const stop = React.useCallback(() => {
+    streamIdRef.current = null;
     abortRef.current?.abort();
     abortRef.current = null;
     setIsStreaming(false);
@@ -87,14 +94,21 @@ export function useChatStream({
         content: trimmed
       });
 
+      const streamId = createId("stream");
+      streamIdRef.current = streamId;
       setIsStreaming(true);
       const controller = new AbortController();
       abortRef.current = controller;
+      const activeThread = threadId;
 
       try {
         const payload = buildStreamPayload(sessionId, threadId, trimmed);
         const stream = await runChatStream(payload, controller.signal);
         for await (const event of stream) {
+          if (streamIdRef.current !== streamId || threadRef.current !== activeThread) {
+            controller.abort();
+            break;
+          }
           onStreamEvent(event);
         }
       } catch (error) {
@@ -110,6 +124,9 @@ export function useChatStream({
       } finally {
         if (abortRef.current === controller) {
           abortRef.current = null;
+        }
+        if (streamIdRef.current === streamId) {
+          streamIdRef.current = null;
         }
         setIsStreaming(false);
       }

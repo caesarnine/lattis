@@ -62,21 +62,13 @@ function asNonEmptyString(value: unknown): string | null {
 
 export function useChatItems() {
   const [items, setItems] = React.useState<RenderItem[]>([]);
-  const messageIndex = React.useRef(new Map<string, number>());
-  const toolIndex = React.useRef(new Map<string, number>());
 
   const clearItems = React.useCallback(() => {
     setItems([]);
-    messageIndex.current = new Map();
-    toolIndex.current = new Map();
   }, []);
 
   const addMessageItem = React.useCallback((message: MessageItem) => {
-    setItems((prev) => {
-      const next = [...prev, message];
-      messageIndex.current.set(message.id, next.length - 1);
-      return next;
-    });
+    setItems((prev) => [...prev, message]);
   }, []);
 
   const addMessage = React.useCallback(
@@ -90,6 +82,21 @@ export function useChatItems() {
       });
     },
     [addMessageItem]
+  );
+
+  const ensureMessageItem = React.useCallback(
+    (message: MessageItem) => {
+      setItems((prev) => {
+        const index = prev.findIndex(
+          (item) => item.kind === "message" && item.id === message.id
+        );
+        if (index !== -1) {
+          return prev;
+        }
+        return [...prev, message];
+      });
+    },
+    []
   );
 
   const addSystemMessage = React.useCallback(
@@ -108,17 +115,17 @@ export function useChatItems() {
       if (!delta) return;
 
       setItems((prev) => {
-        const index = messageIndex.current.get(messageId);
-        if (index === undefined) {
+        const index = prev.findIndex(
+          (item) => item.kind === "message" && item.id === messageId
+        );
+        if (index === -1) {
           const fallbackMessage: MessageItem = {
             kind: "message",
             id: messageId,
             role: fallbackRole,
             content: delta
           };
-          const next = [...prev, fallbackMessage];
-          messageIndex.current.set(messageId, next.length - 1);
-          return next;
+          return [...prev, fallbackMessage];
         }
 
         const next = [...prev];
@@ -134,19 +141,13 @@ export function useChatItems() {
     []
   );
 
-  const addToolItem = React.useCallback((tool: ToolItem) => {
-    setItems((prev) => {
-      const next = [...prev, tool];
-      toolIndex.current.set(tool.id, next.length - 1);
-      return next;
-    });
-  }, []);
-
   const updateToolItem = React.useCallback(
     (toolId: string, updater: (item: ToolItem) => ToolItem) => {
       setItems((prev) => {
-        const index = toolIndex.current.get(toolId);
-        if (index === undefined) return prev;
+        const index = prev.findIndex(
+          (item) => item.kind === "tool" && item.id === toolId
+        );
+        if (index === -1) return prev;
         const next = [...prev];
         const item = next[index];
         if (item.kind !== "tool") return prev;
@@ -159,24 +160,34 @@ export function useChatItems() {
 
   const ensureToolItem = React.useCallback(
     (toolCallId: string, toolName?: string) => {
-      if (toolIndex.current.has(toolCallId)) {
-        if (toolName) {
-          updateToolItem(toolCallId, (item) => ({
-            ...item,
-            toolName: item.toolName === "tool" ? toolName : item.toolName
-          }));
+      if (!toolCallId) return;
+      setItems((prev) => {
+        const index = prev.findIndex(
+          (item) => item.kind === "tool" && item.id === toolCallId
+        );
+        if (index !== -1) {
+          if (toolName) {
+            const item = prev[index];
+            if (item.kind === "tool" && item.toolName === "tool") {
+              const next = [...prev];
+              next[index] = { ...item, toolName };
+              return next;
+            }
+          }
+          return prev;
         }
-        return;
-      }
-
-      addToolItem({
-        kind: "tool",
-        id: toolCallId,
-        toolName: toolName ?? "tool",
-        argsRaw: ""
+        return [
+          ...prev,
+          {
+            kind: "tool",
+            id: toolCallId,
+            toolName: toolName ?? "tool",
+            argsRaw: ""
+          }
+        ];
       });
     },
-    [addToolItem, updateToolItem]
+    []
   );
 
   const setToolArgs = React.useCallback(
@@ -209,7 +220,8 @@ export function useChatItems() {
         case "text-start": {
           const messageId = asNonEmptyString(event.id);
           if (!messageId) return;
-          addMessage({
+          ensureMessageItem({
+            kind: "message",
             id: messageId,
             role: "assistant",
             content: EMPTY_MESSAGE
@@ -227,13 +239,12 @@ export function useChatItems() {
         case "reasoning-start": {
           const messageId = asNonEmptyString(event.id);
           if (!messageId) return;
-          if (!messageIndex.current.has(messageId)) {
-            addMessage({
-              id: messageId,
-              role: "thinking",
-              content: EMPTY_MESSAGE
-            });
-          }
+          ensureMessageItem({
+            kind: "message",
+            id: messageId,
+            role: "thinking",
+            content: EMPTY_MESSAGE
+          });
           return;
         }
         case "reasoning-delta": {
@@ -307,8 +318,8 @@ export function useChatItems() {
       }
     },
     [
-      addMessage,
       addSystemMessage,
+      ensureMessageItem,
       ensureToolItem,
       setToolArgs,
       setToolResult,
