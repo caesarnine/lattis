@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Literal
 
 from lattis.settings.env import (
     LATTIS_DATA_DIR,
+    LATTIS_DATA_DIR_NAME,
     LATTIS_DB_PATH,
     LATTIS_PROJECT_ROOT,
     LATTIS_SESSION_FILE,
@@ -38,10 +40,23 @@ def _resolve_workspace_mode(value: str | None) -> Literal["central", "local"]:
     return "central"
 
 
+def _normalize_data_dir_name(value: str | None) -> str:
+    if value is None:
+        return "lattis"
+    value = value.strip().lstrip(".")
+    if not value:
+        return "lattis"
+    for sep in (os.sep, os.altsep):
+        if sep and sep in value:
+            return "lattis"
+    return value
+
+
 def resolve_storage_config(
     *,
     project_root: Path | str | None = None,
     workspace_mode: str | None = None,
+    data_dir_name: str | None = None,
     data_dir: Path | str | None = None,
     workspace_dir: Path | str | None = None,
     db_path: Path | str | None = None,
@@ -54,10 +69,11 @@ def resolve_storage_config(
     resolved_mode = _resolve_workspace_mode(workspace_mode)
 
     if data_dir is None:
+        dir_name = f".{_normalize_data_dir_name(data_dir_name)}"
         if resolved_mode == "local":
-            data_dir = resolved_project_root / ".lattis"
+            data_dir = resolved_project_root / dir_name
         else:
-            data_dir = Path.home() / ".lattis"
+            data_dir = Path.home() / dir_name
     else:
         data_dir = _coerce_path(data_dir)
 
@@ -90,6 +106,7 @@ def resolve_storage_config_from_env(
     *,
     project_root: Path | str | None = None,
     workspace_mode: str | None = None,
+    data_dir_name: str | None = None,
     data_dir: Path | str | None = None,
     workspace_dir: Path | str | None = None,
     db_path: Path | str | None = None,
@@ -97,6 +114,7 @@ def resolve_storage_config_from_env(
 ) -> StorageConfig:
     env_project_root = read_env(LATTIS_PROJECT_ROOT)
     env_workspace_mode = read_env(LATTIS_WORKSPACE_MODE)
+    env_data_dir_name = read_env(LATTIS_DATA_DIR_NAME)
     env_data_dir = read_env(LATTIS_DATA_DIR)
     env_workspace_dir = read_env(LATTIS_WORKSPACE_DIR)
     env_db_path = read_env(LATTIS_DB_PATH)
@@ -104,6 +122,7 @@ def resolve_storage_config_from_env(
     return resolve_storage_config(
         project_root=project_root or env_project_root,
         workspace_mode=workspace_mode or env_workspace_mode,
+        data_dir_name=data_dir_name or env_data_dir_name,
         data_dir=data_dir or env_data_dir,
         workspace_dir=workspace_dir or env_workspace_dir,
         db_path=db_path or env_db_path,
@@ -115,6 +134,7 @@ def load_storage_config(
     *,
     project_root: Path | str | None = None,
     workspace_mode: str | None = None,
+    data_dir_name: str | None = None,
     data_dir: Path | str | None = None,
     workspace_dir: Path | str | None = None,
     db_path: Path | str | None = None,
@@ -123,6 +143,7 @@ def load_storage_config(
     config = resolve_storage_config_from_env(
         project_root=project_root,
         workspace_mode=workspace_mode,
+        data_dir_name=data_dir_name,
         data_dir=data_dir,
         workspace_dir=workspace_dir,
         db_path=db_path,

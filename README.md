@@ -153,6 +153,7 @@ Typical layout:
 | `LATTIS_SERVER_URL` | *(unset)* | Server URL for clients that connect over HTTP |
 | `LATTIS_PROJECT_ROOT` | *(cwd)* | Project root used for `local` storage mode |
 | `LATTIS_DATA_DIR` | *(derived)* | Override the data directory |
+| `LATTIS_DATA_DIR_NAME` | `lattis` | Data directory name used when deriving `LATTIS_DATA_DIR` |
 | `LATTIS_WORKSPACE_DIR` | *(derived)* | Override the workspace directory |
 | `LATTIS_DB_PATH` | *(derived)* | Override the SQLite DB path |
 | `LATTIS_SESSION_FILE` | *(derived)* | Override the session id file path |
