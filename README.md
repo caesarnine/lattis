@@ -1,6 +1,22 @@
-# Lattis
+<p align="center" style="bold">Lattis</p>
+<p align="center">
+  Self-hosted agent server with a terminal UI, web UI, and persistent threads.
+</p>
 
-Self-hosted agent server with a terminal UI, web UI, and persistent threads.
+<table align="center">
+  <tr>
+    <td align="center">
+      <img src="https://github.com/user-attachments/assets/a0ace246-70db-4c03-be6a-a5077272fa87" width="100%" />
+      <br>
+      <b>Terminal UI</b>
+    </td>
+    <td align="center">
+      <img src="https://github.com/user-attachments/assets/240d00da-ad79-4af8-a101-567869f6121f" width="100%" />
+      <br>
+      <b>Web UI</b>
+    </td>
+  </tr>
+</table>
 
 Lattis runs the agents on a server. Clients (TUI or browser) connect over HTTP. Threads live in SQLite so you can start on one device and continue on another.
 
