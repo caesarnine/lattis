@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import argparse
 import os
 import socket
@@ -19,7 +20,16 @@ from lattis.settings.env import (
     AGENT_PLUGINS,
     LATTIS_PROJECT_ROOT,
     LATTIS_SERVER_URL,
+    LATTIS_TELEGRAM_BOT_TOKEN,
+    LATTIS_TELEGRAM_SESSION_ID,
+    LATTIS_TELEGRAM_THREAD_PREFIX,
     read_env,
+)
+from lattis.telegram import (
+    DEFAULT_TELEGRAM_SESSION_ID,
+    DEFAULT_TELEGRAM_THREAD_PREFIX,
+    TelegramBotConfig,
+    run_telegram_bridge,
 )
 from lattis.tui.app import run_tui
 
@@ -96,6 +106,9 @@ def main(argv: list[str] | None = None) -> None:
     if command == "server":
         _run_server_command(args)
         return
+    if command == "telegram":
+        _run_telegram_command(args)
+        return
 
     parser.print_help()
 
@@ -109,6 +122,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     server_parser = subparsers.add_parser("server", help="Run the API server")
     _add_server_args(server_parser)
+
+    telegram_parser = subparsers.add_parser("telegram", help="Run a Telegram chat bridge")
+    _add_telegram_args(telegram_parser)
 
     return parser
 
@@ -165,6 +181,31 @@ def _add_server_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_telegram_args(parser: argparse.ArgumentParser) -> None:
+    _add_tui_args(parser)
+    parser.add_argument(
+        "--token",
+        default=read_env(LATTIS_TELEGRAM_BOT_TOKEN),
+        help=f"Telegram bot token (or {LATTIS_TELEGRAM_BOT_TOKEN})",
+    )
+    parser.add_argument(
+        "--session-id",
+        default=read_env(LATTIS_TELEGRAM_SESSION_ID) or DEFAULT_TELEGRAM_SESSION_ID,
+        help=f"Lattis session id for Telegram threads (or {LATTIS_TELEGRAM_SESSION_ID})",
+    )
+    parser.add_argument(
+        "--thread-prefix",
+        default=read_env(LATTIS_TELEGRAM_THREAD_PREFIX) or DEFAULT_TELEGRAM_THREAD_PREFIX,
+        help=f"Thread id prefix per chat id (or {LATTIS_TELEGRAM_THREAD_PREFIX})",
+    )
+    parser.add_argument(
+        "--poll-timeout",
+        type=int,
+        default=30,
+        help="Telegram long-poll timeout in seconds (default: %(default)s)",
+    )
+
+
 def _run_tui_command(args: argparse.Namespace) -> None:
     project_root = Path.cwd()
 
@@ -187,6 +228,44 @@ def _run_server_command(args: argparse.Namespace) -> None:
     )
 
     uvicorn.run("lattis.server.asgi:app", host=args.host, port=args.port, reload=args.reload)
+
+
+def _run_telegram_command(args: argparse.Namespace) -> None:
+    token = str(getattr(args, "token", "") or "").strip()
+    if not token:
+        raise SystemExit(
+            f"Missing Telegram bot token. Set --token or {LATTIS_TELEGRAM_BOT_TOKEN}."
+        )
+
+    session_id = str(getattr(args, "session_id", "") or "").strip() or DEFAULT_TELEGRAM_SESSION_ID
+    thread_prefix = str(getattr(args, "thread_prefix", "") or "").strip() or DEFAULT_TELEGRAM_THREAD_PREFIX
+    poll_timeout = max(int(getattr(args, "poll_timeout", 30) or 30), 1)
+
+    project_root = Path.cwd()
+    context = _create_tui_client(args, project_root=project_root)
+    print(context.connection_info.status_message)
+    print(
+        "Telegram bridge ready:"
+        f" session='{session_id}'"
+        f" thread-prefix='{thread_prefix}'"
+        " (send Ctrl+C to stop)."
+    )
+
+    config = TelegramBotConfig(
+        token=token,
+        session_id=session_id,
+        thread_prefix=thread_prefix,
+        poll_timeout=poll_timeout,
+    )
+
+    try:
+        asyncio.run(run_telegram_bridge(client=context.client, config=config))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        asyncio.run(context.client.close())
+        if context.local_server:
+            context.local_server.shutdown()
 
 
 def _normalize_server_url(url: str) -> str:

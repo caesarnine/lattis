@@ -32,7 +32,13 @@ uvx lattis server
 
 # Connect from another machine
 uvx lattis --server http://your-server:8000
+
+# Telegram bridge (one persistent thread per Telegram chat)
+export LATTIS_TELEGRAM_BOT_TOKEN=...
+uvx lattis telegram --server http://localhost:8000
 ```
+
+See `docs/telegram.md` for mapping details and commands.
 
 ## Why Lattis
 
@@ -102,6 +108,7 @@ my-agent = "my_package:plugin"
 lattis                 # TUI (starts a local server)
 lattis tui             # TUI explicitly
 lattis server          # API server + web UI
+lattis telegram        # Telegram bridge client
 ```
 
 Common options:
@@ -131,6 +138,9 @@ Common options:
 | `LATTIS_PROJECT_ROOT` | cwd | Project root for storage |
 | `LATTIS_DATA_DIR` | `.lattis` | Data directory |
 | `LATTIS_WORKSPACE_DIR` | | Override workspace location |
+| `LATTIS_TELEGRAM_BOT_TOKEN` | | Telegram bot token for `lattis telegram` |
+| `LATTIS_TELEGRAM_SESSION_ID` | `telegram-bot` | Session id used by Telegram bridge |
+| `LATTIS_TELEGRAM_THREAD_PREFIX` | `tg` | Thread id prefix per Telegram chat |
 
 ## Requirements
 
