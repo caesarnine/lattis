@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import logging
 import os
 import socket
 import subprocess
@@ -14,7 +15,10 @@ from urllib.parse import urlparse
 import httpx
 import uvicorn
 
+from lattis.agents.registry import load_registry
 from lattis.client import AgentClient
+from lattis.runtime.context import AppContext
+from lattis.scheduler import SchedulerConfig, run_scheduler
 from lattis.settings.env import (
     AGENT_DEFAULT,
     AGENT_PLUGINS,
@@ -25,6 +29,8 @@ from lattis.settings.env import (
     LATTIS_TELEGRAM_THREAD_PREFIX,
     read_env,
 )
+from lattis.settings.storage import load_storage_config
+from lattis.storage.sqlite import SQLiteSessionStore
 from lattis.telegram import (
     DEFAULT_TELEGRAM_SESSION_ID,
     DEFAULT_TELEGRAM_THREAD_PREFIX,
@@ -109,6 +115,9 @@ def main(argv: list[str] | None = None) -> None:
     if command == "telegram":
         _run_telegram_command(args)
         return
+    if command == "scheduler":
+        _run_scheduler_command(args)
+        return
 
     parser.print_help()
 
@@ -125,6 +134,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     telegram_parser = subparsers.add_parser("telegram", help="Run a Telegram chat bridge")
     _add_telegram_args(telegram_parser)
+
+    scheduler_parser = subparsers.add_parser("scheduler", help="Run scheduled reminder worker")
+    _add_scheduler_args(scheduler_parser)
 
     return parser
 
@@ -206,6 +218,58 @@ def _add_telegram_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_scheduler_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--agent",
+        default=None,
+        help="Default agent id or name",
+    )
+    parser.add_argument(
+        "--agents",
+        default=None,
+        help="Comma-separated agent plugin specs to load",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=2.0,
+        help="Scheduler poll interval in seconds (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--claim-limit",
+        type=int,
+        default=10,
+        help="Maximum due schedules claimed per loop (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--lease-seconds",
+        type=int,
+        default=120,
+        help="Lease time for claimed schedules (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--retry-seconds",
+        type=int,
+        default=60,
+        help="Retry delay after failures (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run one scheduling pass and exit",
+    )
+    parser.add_argument(
+        "--telegram-token",
+        default=read_env(LATTIS_TELEGRAM_BOT_TOKEN),
+        help=f"Telegram bot token for proactive delivery (or {LATTIS_TELEGRAM_BOT_TOKEN})",
+    )
+    parser.add_argument(
+        "--telegram-thread-prefix",
+        default=read_env(LATTIS_TELEGRAM_THREAD_PREFIX) or DEFAULT_TELEGRAM_THREAD_PREFIX,
+        help=f"Thread id prefix used for Telegram mapping (or {LATTIS_TELEGRAM_THREAD_PREFIX})",
+    )
+
+
 def _run_tui_command(args: argparse.Namespace) -> None:
     project_root = Path.cwd()
 
@@ -266,6 +330,37 @@ def _run_telegram_command(args: argparse.Namespace) -> None:
         asyncio.run(context.client.close())
         if context.local_server:
             context.local_server.shutdown()
+
+
+def _run_scheduler_command(args: argparse.Namespace) -> None:
+    project_root = Path.cwd()
+    agent_specs = _parse_agent_specs(getattr(args, "agents", None))
+    _apply_server_env_defaults(
+        project_root=project_root,
+        default_agent=getattr(args, "agent", None),
+        agent_specs=agent_specs,
+    )
+
+    config = load_storage_config(project_root=project_root)
+    registry = load_registry(plugin_specs=agent_specs, default_spec=getattr(args, "agent", None))
+    store = SQLiteSessionStore(config.db_path)
+    ctx = AppContext(config=config, store=store, registry=registry)
+
+    scheduler_config = SchedulerConfig(
+        poll_interval_seconds=max(0.1, float(getattr(args, "poll_interval", 2.0) or 2.0)),
+        claim_limit=max(1, int(getattr(args, "claim_limit", 10) or 10)),
+        lease_seconds=max(1, int(getattr(args, "lease_seconds", 120) or 120)),
+        retry_delay_seconds=max(1, int(getattr(args, "retry_seconds", 60) or 60)),
+        run_once=bool(getattr(args, "once", False)),
+        telegram_bot_token=str(getattr(args, "telegram_token", "") or "").strip() or None,
+        telegram_thread_prefix=str(
+            getattr(args, "telegram_thread_prefix", "") or DEFAULT_TELEGRAM_THREAD_PREFIX
+        ).strip()
+        or DEFAULT_TELEGRAM_THREAD_PREFIX,
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    asyncio.run(run_scheduler(ctx, scheduler_config))
 
 
 def _normalize_server_url(url: str) -> str:

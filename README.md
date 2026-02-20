@@ -36,9 +36,13 @@ uvx lattis --server http://your-server:8000
 # Telegram bridge (one persistent thread per Telegram chat)
 export LATTIS_TELEGRAM_BOT_TOKEN=...
 uvx lattis telegram --server http://localhost:8000
+
+# Scheduler worker (executes reminders and recurring schedules)
+uvx lattis scheduler
 ```
 
 See `docs/telegram.md` for mapping details and commands.
+See `docs/scheduling.md` for scheduling architecture and recurrence behavior.
 
 ## Why Lattis
 
@@ -84,7 +88,7 @@ def create_agent(model: str) -> Agent:
     return Agent(model, system_prompt="...")
 
 def create_deps(ctx: AgentRunContext):
-    # Access ctx.workspace, ctx.project_root, ctx.session_id, etc.
+    # Access ctx.workspace, ctx.project_root, ctx.session_id, ctx.store, etc.
     return MyDeps(...)
 
 plugin = AgentPlugin(
@@ -109,6 +113,7 @@ lattis                 # TUI (starts a local server)
 lattis tui             # TUI explicitly
 lattis server          # API server + web UI
 lattis telegram        # Telegram bridge client
+lattis scheduler       # Scheduler worker
 ```
 
 Common options:

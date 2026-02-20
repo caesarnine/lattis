@@ -302,6 +302,20 @@ def thread_id_for_chat(chat_id: int, *, prefix: str = DEFAULT_TELEGRAM_THREAD_PR
     return f"{prefix}-{normalized}"
 
 
+def chat_id_for_thread_id(thread_id: str, *, prefix: str = DEFAULT_TELEGRAM_THREAD_PREFIX) -> int | None:
+    marker = f"{prefix}-"
+    if not thread_id.startswith(marker):
+        return None
+    raw = thread_id[len(marker) :].strip()
+    if not raw:
+        return None
+    if raw.startswith("m") and raw[1:].isdigit():
+        return -int(raw[1:])
+    if raw.isdigit():
+        return int(raw)
+    return None
+
+
 async def run_telegram_bridge(*, client: AgentClient, config: TelegramBotConfig) -> None:
     bridge = TelegramBotBridge(config=config, agent_client=client)
     await bridge.run_forever()

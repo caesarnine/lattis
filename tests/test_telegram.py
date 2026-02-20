@@ -6,6 +6,7 @@ import pytest
 
 from lattis.telegram import (
     build_run_input,
+    chat_id_for_thread_id,
     collect_assistant_text,
     split_telegram_message,
     thread_id_for_chat,
@@ -16,6 +17,12 @@ def test_thread_id_for_chat_formats_positive_and_negative() -> None:
     assert thread_id_for_chat(1234) == "tg-1234"
     assert thread_id_for_chat(-5678) == "tg-m5678"
     assert thread_id_for_chat(42, prefix="chat") == "chat-42"
+
+
+def test_chat_id_for_thread_id_round_trip() -> None:
+    assert chat_id_for_thread_id("tg-1234") == 1234
+    assert chat_id_for_thread_id("tg-m5678") == -5678
+    assert chat_id_for_thread_id("other-1234") is None
 
 
 def test_split_telegram_message_respects_limit() -> None:

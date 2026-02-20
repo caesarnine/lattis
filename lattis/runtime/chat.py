@@ -86,6 +86,7 @@ def prepare_chat_run(
         model=model_name,
         workspace=ctx.workspace,
         project_root=ctx.project_root,
+        store=ctx.store,
         run_input=run_input,
     )
 
