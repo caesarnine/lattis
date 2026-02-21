@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from pydantic_ai.messages import ModelMessage
 
 if TYPE_CHECKING:
-    from lattis.domain.schedules import ScheduleRecord
+    from lattis.domain.schedules import ScheduleRecord, ScheduleRunRecord
 
 
 @dataclass
@@ -127,6 +127,39 @@ class SessionStore(Protocol):
         retry_at: float,
         error: str,
     ) -> "ScheduleRecord | None": ...
+
+    def set_schedule_state_record(
+        self,
+        *,
+        schedule_id: str,
+        session_id: str,
+        thread_id: str,
+        state_json: dict[str, object] | None,
+        expected_version: int | None,
+        updated_at: float,
+    ) -> "ScheduleRecord | None": ...
+
+    def create_schedule_run_record(
+        self,
+        *,
+        run_id: str,
+        schedule_id: str,
+        session_id: str,
+        thread_id: str,
+        trigger_prompt: str,
+        started_at: float,
+    ) -> "ScheduleRunRecord": ...
+
+    def finish_schedule_run_record(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        result_text: str | None,
+        error: str | None,
+        notified_count: int,
+        finished_at: float,
+    ) -> "ScheduleRunRecord | None": ...
 
 
 def generate_thread_id(prefix: str = "thread") -> str:

@@ -6,19 +6,26 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 import httpx
+from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.ui.vercel_ai.request_types import SubmitMessage, TextUIPart, UIMessage
 
+from lattis.domain.messages import merge_messages
 from lattis.domain.schedules import (
+    SCHEDULE_RUN_STATUS_DONE,
+    SCHEDULE_RUN_STATUS_FAILED,
     ScheduleRecord,
     cancel_schedule,
     claim_due_schedules,
     complete_schedule_run,
+    create_schedule_run,
     fail_schedule_run,
+    finish_schedule_run,
     format_due_at,
 )
-from lattis.domain.threads import ThreadNotFoundError
-from lattis.runtime.chat import create_chat_stream
+from lattis.domain.threads import ThreadNotFoundError, load_thread_messages
+from lattis.runtime.chat import create_ephemeral_chat_stream
 from lattis.runtime.context import AppContext
+from lattis.schedule_tools import collect_scheduler_notifications
 from lattis.telegram import DEFAULT_TELEGRAM_THREAD_PREFIX, chat_id_for_thread_id, split_telegram_message
 
 logger = logging.getLogger(__name__)
@@ -125,14 +132,34 @@ class SchedulerWorker:
         return len(due)
 
     async def _process_schedule(self, schedule: ScheduleRecord) -> None:
+        trigger_prompt = self._build_trigger_prompt(schedule)
+        run_record = create_schedule_run(
+            self.ctx.store,
+            schedule=schedule,
+            trigger_prompt=trigger_prompt,
+        )
         try:
-            message = await self._run_schedule(schedule)
-            await self._deliver_proactive_message(schedule, message)
+            result_text, notifications = await self._run_schedule(schedule, trigger_prompt=trigger_prompt)
+            notified_count = 0
+            for message in notifications:
+                await self._deliver_proactive_message(schedule, message)
+                self._append_assistant_notification(schedule, message)
+                notified_count += 1
+
             complete_schedule_run(self.ctx.store, schedule=schedule)
+            finish_schedule_run(
+                self.ctx.store,
+                run_id=run_record.run_id,
+                status=SCHEDULE_RUN_STATUS_DONE,
+                result_text=result_text or None,
+                error=None,
+                notified_count=notified_count,
+            )
             logger.info(
-                "schedule complete id=%s thread=%s next=%s",
+                "schedule complete id=%s thread=%s notifications=%s next=%s",
                 schedule.schedule_id,
                 schedule.thread_id,
+                notified_count,
                 "interval" if schedule.interval_seconds else "none",
             )
         except ThreadNotFoundError:
@@ -147,6 +174,14 @@ class SchedulerWorker:
                 thread_id=schedule.thread_id,
                 schedule_id=schedule.schedule_id,
             )
+            finish_schedule_run(
+                self.ctx.store,
+                run_id=run_record.run_id,
+                status=SCHEDULE_RUN_STATUS_FAILED,
+                result_text=None,
+                error=f"Thread '{schedule.thread_id}' not found.",
+                notified_count=0,
+            )
         except Exception as exc:
             logger.exception("schedule failed id=%s", schedule.schedule_id)
             fail_schedule_run(
@@ -155,29 +190,40 @@ class SchedulerWorker:
                 error=str(exc),
                 retry_delay_seconds=self.config.retry_delay_seconds,
             )
+            finish_schedule_run(
+                self.ctx.store,
+                run_id=run_record.run_id,
+                status=SCHEDULE_RUN_STATUS_FAILED,
+                result_text=None,
+                error=str(exc),
+                notified_count=0,
+            )
 
-    async def _run_schedule(self, schedule: ScheduleRecord) -> str:
+    async def _run_schedule(
+        self,
+        schedule: ScheduleRecord,
+        *,
+        trigger_prompt: str,
+    ) -> tuple[str, list[str]]:
         run_input = SubmitMessage(
             id=uuid4().hex,
             session_id=schedule.session_id,
             thread_id=schedule.thread_id,
             scheduler_trigger=True,
+            schedule_id=schedule.schedule_id,
             messages=[
                 UIMessage(
                     id=uuid4().hex,
                     role="user",
-                    parts=[TextUIPart(text=self._build_trigger_prompt(schedule))],
+                    parts=[TextUIPart(text=trigger_prompt)],
                 )
             ],
         )
-        _, stream = create_chat_stream(self.ctx, run_input, accept="text/event-stream")
+        _, deps, stream = create_ephemeral_chat_stream(self.ctx, run_input, accept="text/event-stream")
         collector = _StreamTextCollector()
         async for chunk in stream:
             collector.add(chunk)
-        text = collector.render().strip()
-        if text:
-            return text
-        return schedule.prompt
+        return collector.render().strip(), collect_scheduler_notifications(deps)
 
     async def _deliver_proactive_message(self, schedule: ScheduleRecord, message: str) -> None:
         chat_id = chat_id_for_thread_id(
@@ -199,7 +245,9 @@ class SchedulerWorker:
             )
             self._telegram_client = client
 
-        text = message.strip() or f"Reminder: {schedule.prompt}"
+        text = message.strip()
+        if not text:
+            return
         for chunk in split_telegram_message(text):
             response = await client.post(
                 "/sendMessage",
@@ -214,14 +262,32 @@ class SchedulerWorker:
                 detail = payload.get("description") if isinstance(payload, dict) else None
                 raise RuntimeError(str(detail or "Telegram sendMessage failed."))
 
+    def _append_assistant_notification(self, schedule: ScheduleRecord, message: str) -> None:
+        existing = list(
+            load_thread_messages(
+                self.ctx.store,
+                session_id=schedule.session_id,
+                thread_id=schedule.thread_id,
+            )
+        )
+        assistant = ModelResponse(parts=[TextPart(content=message.strip())])
+        updated = merge_messages(existing, [assistant])
+        self.ctx.store.save_thread(
+            schedule.session_id,
+            schedule.thread_id,
+            messages=updated,
+        )
+
     @staticmethod
     def _build_trigger_prompt(schedule: ScheduleRecord) -> str:
         return (
-            "Scheduled reminder trigger.\n"
+            "Scheduled background task trigger.\n"
             f"Schedule ID: {schedule.schedule_id}\n"
             f"Due (UTC): {format_due_at(schedule.due_at)}\n"
-            f"Reminder request: {schedule.prompt}\n\n"
-            "Please send the proactive reminder message to the user now."
+            f"Task request: {schedule.prompt}\n\n"
+            "Run the task now. Use schedule_state_get and schedule_state_set for checkpointing.\n"
+            "Only call notify_user when the user should receive an actual proactive message.\n"
+            "If nothing should be sent, do not call notify_user."
         )
 
 

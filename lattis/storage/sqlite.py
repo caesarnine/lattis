@@ -10,11 +10,13 @@ from pydantic_ai.messages import ModelMessage
 
 from lattis.domain.messages import dump_messages, load_messages
 from lattis.domain.schedules import (
+    SCHEDULE_RUN_STATUS_RUNNING,
     SCHEDULE_STATUS_CANCELED,
     SCHEDULE_STATUS_DONE,
     SCHEDULE_STATUS_PENDING,
     SCHEDULE_STATUS_RUNNING,
     ScheduleRecord,
+    ScheduleRunRecord,
 )
 from lattis.domain.sessions import SessionStore, ThreadSettings, ThreadState
 
@@ -206,9 +208,11 @@ class SQLiteSessionStore(SessionStore):
                 INSERT INTO schedules (
                     schedule_id, session_id, thread_id, prompt, due_at,
                     interval_seconds, status, lease_expires_at,
-                    attempt_count, last_error, last_run_at, created_at, updated_at
+                    attempt_count, last_error, last_run_at,
+                    state_json, state_version,
+                    created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, NULL, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, NULL, NULL, 0, ?, ?)
                 """,
                 (
                     schedule_id,
@@ -504,6 +508,151 @@ class SQLiteSessionStore(SessionStore):
             ).fetchone()
         return self._schedule_from_row(row) if row else None
 
+    def set_schedule_state_record(
+        self,
+        *,
+        schedule_id: str,
+        session_id: str,
+        thread_id: str,
+        state_json: dict[str, object] | None,
+        expected_version: int | None,
+        updated_at: float,
+    ) -> ScheduleRecord | None:
+        payload = json.dumps(state_json, ensure_ascii=True, separators=(",", ":")) if state_json is not None else None
+        with self._connect() as conn:
+            if expected_version is None:
+                cursor = conn.execute(
+                    """
+                    UPDATE schedules
+                    SET state_json = ?,
+                        state_version = state_version + 1,
+                        updated_at = ?
+                    WHERE schedule_id = ?
+                      AND session_id = ?
+                      AND thread_id = ?
+                      AND status IN (?, ?)
+                    """,
+                    (
+                        payload,
+                        updated_at,
+                        schedule_id,
+                        session_id,
+                        thread_id,
+                        SCHEDULE_STATUS_PENDING,
+                        SCHEDULE_STATUS_RUNNING,
+                    ),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE schedules
+                    SET state_json = ?,
+                        state_version = state_version + 1,
+                        updated_at = ?
+                    WHERE schedule_id = ?
+                      AND session_id = ?
+                      AND thread_id = ?
+                      AND status IN (?, ?)
+                      AND state_version = ?
+                    """,
+                    (
+                        payload,
+                        updated_at,
+                        schedule_id,
+                        session_id,
+                        thread_id,
+                        SCHEDULE_STATUS_PENDING,
+                        SCHEDULE_STATUS_RUNNING,
+                        expected_version,
+                    ),
+                )
+            if cursor.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT * FROM schedules WHERE schedule_id = ?",
+                (schedule_id,),
+            ).fetchone()
+        return self._schedule_from_row(row) if row else None
+
+    def create_schedule_run_record(
+        self,
+        *,
+        run_id: str,
+        schedule_id: str,
+        session_id: str,
+        thread_id: str,
+        trigger_prompt: str,
+        started_at: float,
+    ) -> ScheduleRunRecord:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO schedule_runs (
+                    run_id, schedule_id, session_id, thread_id, status,
+                    trigger_prompt, result_text, error, notified_count,
+                    started_at, finished_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 0, ?, NULL, ?, ?)
+                """,
+                (
+                    run_id,
+                    schedule_id,
+                    session_id,
+                    thread_id,
+                    SCHEDULE_RUN_STATUS_RUNNING,
+                    trigger_prompt,
+                    started_at,
+                    started_at,
+                    started_at,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM schedule_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        assert row is not None
+        return self._schedule_run_from_row(row)
+
+    def finish_schedule_run_record(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        result_text: str | None,
+        error: str | None,
+        notified_count: int,
+        finished_at: float,
+    ) -> ScheduleRunRecord | None:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE schedule_runs
+                SET status = ?,
+                    result_text = ?,
+                    error = ?,
+                    notified_count = ?,
+                    finished_at = ?,
+                    updated_at = ?
+                WHERE run_id = ?
+                """,
+                (
+                    status,
+                    result_text,
+                    error,
+                    max(0, notified_count),
+                    finished_at,
+                    finished_at,
+                    run_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT * FROM schedule_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        return self._schedule_run_from_row(row) if row else None
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
@@ -568,6 +717,8 @@ class SQLiteSessionStore(SessionStore):
                     attempt_count INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT,
                     last_run_at REAL,
+                    state_json TEXT,
+                    state_version INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 )
@@ -585,6 +736,32 @@ class SQLiteSessionStore(SessionStore):
                 ON schedules(session_id, thread_id, updated_at)
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schedule_runs (
+                    run_id TEXT PRIMARY KEY,
+                    schedule_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    trigger_prompt TEXT NOT NULL,
+                    result_text TEXT,
+                    error TEXT,
+                    notified_count INTEGER NOT NULL DEFAULT 0,
+                    started_at REAL NOT NULL,
+                    finished_at REAL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule
+                ON schedule_runs(schedule_id, started_at DESC)
+                """
+            )
+            self._ensure_schedule_schema(conn)
 
     def _touch_session(self, conn: sqlite3.Connection, session_id: str, *, now: float) -> None:
         conn.execute(
@@ -637,6 +814,16 @@ class SQLiteSessionStore(SessionStore):
 
     @staticmethod
     def _schedule_from_row(row: sqlite3.Row) -> ScheduleRecord:
+        state_json: dict[str, object] | None = None
+        raw_state = row["state_json"] if "state_json" in row.keys() else None
+        if isinstance(raw_state, str) and raw_state:
+            try:
+                loaded = json.loads(raw_state)
+                if isinstance(loaded, dict):
+                    state_json = loaded
+            except Exception:
+                state_json = None
+
         return ScheduleRecord(
             schedule_id=row["schedule_id"],
             session_id=row["session_id"],
@@ -649,6 +836,40 @@ class SQLiteSessionStore(SessionStore):
             attempt_count=int(row["attempt_count"]),
             last_error=str(row["last_error"]) if row["last_error"] is not None else None,
             last_run_at=float(row["last_run_at"]) if row["last_run_at"] is not None else None,
+            state_json=state_json,
+            state_version=int(row["state_version"]) if "state_version" in row.keys() else 0,
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
         )
+
+    @staticmethod
+    def _schedule_run_from_row(row: sqlite3.Row) -> ScheduleRunRecord:
+        return ScheduleRunRecord(
+            run_id=row["run_id"],
+            schedule_id=row["schedule_id"],
+            session_id=row["session_id"],
+            thread_id=row["thread_id"],
+            status=row["status"],
+            trigger_prompt=row["trigger_prompt"],
+            result_text=str(row["result_text"]) if row["result_text"] is not None else None,
+            error=str(row["error"]) if row["error"] is not None else None,
+            notified_count=int(row["notified_count"]),
+            started_at=float(row["started_at"]),
+            finished_at=float(row["finished_at"]) if row["finished_at"] is not None else None,
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+        )
+
+    def _ensure_schedule_schema(self, conn: sqlite3.Connection) -> None:
+        if not self._column_exists(conn, table="schedules", column="state_json"):
+            conn.execute("ALTER TABLE schedules ADD COLUMN state_json TEXT")
+        if not self._column_exists(conn, table="schedules", column="state_version"):
+            conn.execute("ALTER TABLE schedules ADD COLUMN state_version INTEGER NOT NULL DEFAULT 0")
+
+    @staticmethod
+    def _column_exists(conn: sqlite3.Connection, *, table: str, column: str) -> bool:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        for row in rows:
+            if len(row) >= 2 and row[1] == column:
+                return True
+        return False

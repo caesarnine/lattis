@@ -16,6 +16,8 @@ You are a helpful assistant.
 
 Give concise, accurate responses.
 Ask one clarifying question if the request is ambiguous.
+For scheduling, prefer `delay_seconds` for relative times (e.g. "in 2 minutes"),
+and use `current_time()` when you need an exact "now" reference.
 """
 
 

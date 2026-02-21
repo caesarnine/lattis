@@ -125,6 +125,27 @@ def create_chat_stream(
     return run.adapter, stream
 
 
+def create_ephemeral_chat_stream(
+    ctx: AppContext,
+    run_input: RequestData,
+    *,
+    accept: str | None = None,
+) -> tuple[ChatRun, Any, Any]:
+    run = prepare_chat_run(ctx, run_input, accept=accept)
+    deps = run.plugin.create_deps(run.run_ctx) if run.plugin.create_deps else None
+
+    def on_complete(result) -> None:
+        if run.plugin.on_complete:
+            run.plugin.on_complete(run.run_ctx, result)
+
+    stream = run.adapter.run_stream(
+        deps=deps,
+        message_history=run.message_history,
+        on_complete=on_complete,
+    )
+    return run, deps, stream
+
+
 def _resolve_extra_string(run_input: RequestData, *keys: str) -> str | None:
     for key in keys:
         value = getattr(run_input, key, None)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from typing import Any
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -16,12 +17,20 @@ SCHEDULE_STATUS_CANCELED = "canceled"
 ACTIVE_STATUSES = {SCHEDULE_STATUS_PENDING, SCHEDULE_STATUS_RUNNING}
 TERMINAL_STATUSES = {SCHEDULE_STATUS_DONE, SCHEDULE_STATUS_CANCELED}
 
+SCHEDULE_RUN_STATUS_RUNNING = "running"
+SCHEDULE_RUN_STATUS_DONE = "done"
+SCHEDULE_RUN_STATUS_FAILED = "failed"
+
 
 class ScheduleValidationError(ValueError):
     pass
 
 
 class ScheduleNotFoundError(LookupError):
+    pass
+
+
+class ScheduleStateConflictError(ValueError):
     pass
 
 
@@ -38,6 +47,8 @@ class ScheduleRecord:
     attempt_count: int
     last_error: str | None
     last_run_at: float | None
+    state_json: dict[str, Any] | None
+    state_version: int
     created_at: float
     updated_at: float
 
@@ -46,8 +57,29 @@ class ScheduleRecord:
         return self.interval_seconds is not None
 
 
+@dataclass(frozen=True)
+class ScheduleRunRecord:
+    run_id: str
+    schedule_id: str
+    session_id: str
+    thread_id: str
+    status: str
+    trigger_prompt: str
+    result_text: str | None
+    error: str | None
+    notified_count: int
+    started_at: float
+    finished_at: float | None
+    created_at: float
+    updated_at: float
+
+
 def new_schedule_id() -> str:
     return f"sched-{uuid.uuid4().hex[:12]}"
+
+
+def new_schedule_run_id() -> str:
+    return f"run-{uuid.uuid4().hex[:12]}"
 
 
 def parse_due_at(value: str) -> float:
@@ -258,3 +290,84 @@ def fail_schedule_run(
         error=error.strip() or "unknown schedule error",
     )
 
+
+def get_schedule_state(
+    store: SessionStore,
+    *,
+    session_id: str,
+    thread_id: str,
+    schedule_id: str,
+) -> tuple[dict[str, Any] | None, int]:
+    record = get_schedule(
+        store,
+        session_id=session_id,
+        thread_id=thread_id,
+        schedule_id=schedule_id,
+    )
+    return record.state_json, record.state_version
+
+
+def set_schedule_state(
+    store: SessionStore,
+    *,
+    session_id: str,
+    thread_id: str,
+    schedule_id: str,
+    state_json: dict[str, Any] | None,
+    expected_version: int | None = None,
+) -> tuple[dict[str, Any] | None, int]:
+    updated = store.set_schedule_state_record(
+        schedule_id=schedule_id,
+        session_id=session_id,
+        thread_id=thread_id,
+        state_json=state_json,
+        expected_version=expected_version,
+        updated_at=time.time(),
+    )
+    if updated is None:
+        existing = store.get_schedule_record(schedule_id)
+        if existing is None or existing.session_id != session_id or existing.thread_id != thread_id:
+            raise ScheduleNotFoundError(f"Schedule '{schedule_id}' not found.")
+        raise ScheduleStateConflictError(
+            f"Schedule state version mismatch for '{schedule_id}'."
+        )
+    return updated.state_json, updated.state_version
+
+
+def create_schedule_run(
+    store: SessionStore,
+    *,
+    schedule: ScheduleRecord,
+    trigger_prompt: str,
+    started_at: float | None = None,
+) -> ScheduleRunRecord:
+    now = time.time() if started_at is None else started_at
+    return store.create_schedule_run_record(
+        run_id=new_schedule_run_id(),
+        schedule_id=schedule.schedule_id,
+        session_id=schedule.session_id,
+        thread_id=schedule.thread_id,
+        trigger_prompt=trigger_prompt,
+        started_at=now,
+    )
+
+
+def finish_schedule_run(
+    store: SessionStore,
+    *,
+    run_id: str,
+    status: str,
+    result_text: str | None = None,
+    error: str | None = None,
+    notified_count: int = 0,
+    finished_at: float | None = None,
+) -> ScheduleRunRecord | None:
+    now = time.time() if finished_at is None else finished_at
+    return store.finish_schedule_run_record(
+        run_id=run_id,
+        status=status,
+        result_text=result_text,
+        error=error,
+        notified_count=max(0, notified_count),
+        finished_at=now,
+    )

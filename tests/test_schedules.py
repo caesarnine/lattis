@@ -6,19 +6,26 @@ from pathlib import Path
 import pytest
 
 from lattis.domain.schedules import (
+    SCHEDULE_RUN_STATUS_DONE,
+    SCHEDULE_RUN_STATUS_RUNNING,
     SCHEDULE_STATUS_CANCELED,
     SCHEDULE_STATUS_DONE,
     SCHEDULE_STATUS_PENDING,
     SCHEDULE_STATUS_RUNNING,
+    ScheduleStateConflictError,
     ScheduleValidationError,
     cancel_schedule,
     claim_due_schedules,
     complete_schedule_run,
     create_schedule,
+    create_schedule_run,
     fail_schedule_run,
+    finish_schedule_run,
+    get_schedule_state,
     list_schedules,
     next_due_for_interval,
     parse_due_at,
+    set_schedule_state,
     update_schedule,
 )
 from lattis.storage.sqlite import SQLiteSessionStore
@@ -137,3 +144,73 @@ def test_fail_schedule_run_retries_with_error(store: SQLiteSessionStore) -> None
     assert failed.status == SCHEDULE_STATUS_PENDING
     assert failed.last_error == "network error"
     assert failed.due_at >= failed_at + 89
+
+
+def test_schedule_state_roundtrip_and_version_conflict(store: SQLiteSessionStore) -> None:
+    schedule = create_schedule(
+        store,
+        session_id="s1",
+        thread_id="t1",
+        prompt="Track mailbox cursor",
+        due_at=time.time() + 30,
+    )
+
+    state, version = get_schedule_state(
+        store,
+        session_id="s1",
+        thread_id="t1",
+        schedule_id=schedule.schedule_id,
+    )
+    assert state is None
+    assert version == 0
+
+    state, version = set_schedule_state(
+        store,
+        session_id="s1",
+        thread_id="t1",
+        schedule_id=schedule.schedule_id,
+        state_json={"cursor": "A1"},
+        expected_version=0,
+    )
+    assert state == {"cursor": "A1"}
+    assert version == 1
+
+    with pytest.raises(ScheduleStateConflictError):
+        set_schedule_state(
+            store,
+            session_id="s1",
+            thread_id="t1",
+            schedule_id=schedule.schedule_id,
+            state_json={"cursor": "A2"},
+            expected_version=0,
+        )
+
+
+def test_schedule_run_record_lifecycle(store: SQLiteSessionStore) -> None:
+    schedule = create_schedule(
+        store,
+        session_id="s1",
+        thread_id="t1",
+        prompt="Run audit sample",
+        due_at=time.time() + 60,
+    )
+    run_record = create_schedule_run(
+        store,
+        schedule=schedule,
+        trigger_prompt="test trigger",
+    )
+    assert run_record.status == SCHEDULE_RUN_STATUS_RUNNING
+    assert run_record.finished_at is None
+
+    finished = finish_schedule_run(
+        store,
+        run_id=run_record.run_id,
+        status=SCHEDULE_RUN_STATUS_DONE,
+        result_text="all good",
+        notified_count=2,
+    )
+    assert finished is not None
+    assert finished.status == SCHEDULE_RUN_STATUS_DONE
+    assert finished.result_text == "all good"
+    assert finished.notified_count == 2
+    assert finished.finished_at is not None

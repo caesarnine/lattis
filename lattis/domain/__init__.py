@@ -4,6 +4,8 @@ from lattis.domain.sessions import SessionStore, ThreadSettings, ThreadState, ge
 from lattis.domain.schedules import (
     ScheduleNotFoundError,
     ScheduleRecord,
+    ScheduleRunRecord,
+    ScheduleStateConflictError,
     ScheduleValidationError,
 )
 from lattis.domain.threads import ThreadAlreadyExistsError, ThreadNotFoundError
@@ -13,8 +15,10 @@ __all__ = [
     "ThreadSettings",
     "ThreadState",
     "ScheduleRecord",
+    "ScheduleRunRecord",
     "ScheduleValidationError",
     "ScheduleNotFoundError",
+    "ScheduleStateConflictError",
     "ThreadAlreadyExistsError",
     "ThreadNotFoundError",
     "generate_thread_id",
