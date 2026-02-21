@@ -94,13 +94,16 @@ def register_schedule_tools(agent: Agent[ScheduleToolDeps, Any]) -> None:
         - Set exactly one of `due_at` or `delay_seconds`.
         - Use `delay_seconds` for relative requests (for example "in 120 seconds").
         - `due_at` must be an ISO-8601 datetime with timezone offset.
+        - If `interval_seconds` is set and both `due_at` and `delay_seconds` are omitted,
+          the first run defaults to one interval from now.
         - Set `interval_seconds` to make the schedule recurring.
         """
         if ctx.deps.scheduler_trigger:
             return _SCHEDULER_DISABLED_MESSAGE
-        due_at_ts = _resolve_due_at(
+        due_at_ts = _resolve_schedule_create_due_at(
             due_at=due_at,
             delay_seconds=delay_seconds,
+            interval_seconds=interval_seconds,
         )
         record = create_schedule(
             ctx.deps.store,
@@ -288,6 +291,17 @@ def _resolve_due_at(*, due_at: str | None, delay_seconds: int | None) -> float:
 def _resolve_optional_due_at(*, due_at: str | None, delay_seconds: int | None) -> float | None:
     if due_at is None and delay_seconds is None:
         return None
+    return _resolve_due_at(due_at=due_at, delay_seconds=delay_seconds)
+
+
+def _resolve_schedule_create_due_at(
+    *,
+    due_at: str | None,
+    delay_seconds: int | None,
+    interval_seconds: int | None,
+) -> float:
+    if due_at is None and delay_seconds is None and interval_seconds is not None:
+        delay_seconds = interval_seconds
     return _resolve_due_at(due_at=due_at, delay_seconds=delay_seconds)
 
 

@@ -22,6 +22,8 @@ Built-in agents expose thread-level schedule management tools:
 
 `due_at` must be ISO-8601 with timezone offset (for example `2026-02-19T09:00:00-05:00`).
 For relative requests ("in 2 minutes"), use `delay_seconds` or call `current_time()` first.
+For recurring schedules, if `interval_seconds` is set and no `due_at`/`delay_seconds` is provided,
+the first run defaults to one interval from now.
 
 During scheduler-triggered execution, agents also get scheduler-only tools:
 

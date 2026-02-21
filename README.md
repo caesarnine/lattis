@@ -61,7 +61,7 @@ See `docs/scheduling.md` for scheduling architecture and recurrence behavior.
 
 Lattis discovers agents from:
 
-1. Built-ins: `assistant`, `poetry`
+1. Built-ins: `binsmith`, `assistant`, `poetry`
 2. Entry points: packages that register `lattis.agents`
 3. Explicit specs: `module:attr` via `--agents` or `AGENT_PLUGINS`
 
@@ -137,7 +137,7 @@ Common options:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENT_DEFAULT` | `assistant` | Default agent |
+| `AGENT_DEFAULT` | `binsmith` | Default agent |
 | `AGENT_PLUGINS` | | Extra plugins (comma-separated `module:attr`) |
 | `LATTIS_SERVER_URL` | | Server URL for remote connections |
 | `LATTIS_PROJECT_ROOT` | cwd | Project root for storage |

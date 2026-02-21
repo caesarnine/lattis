@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from lattis.schedule_tools import _resolve_due_at, _resolve_optional_due_at
+from lattis.schedule_tools import _resolve_due_at, _resolve_optional_due_at, _resolve_schedule_create_due_at
 
 
 def test_resolve_due_at_from_delay_seconds() -> None:
@@ -32,3 +32,13 @@ def test_resolve_due_at_rejects_both_absolute_and_delay() -> None:
 def test_resolve_optional_due_at_none() -> None:
     assert _resolve_optional_due_at(due_at=None, delay_seconds=None) is None
 
+
+def test_resolve_schedule_create_due_at_defaults_to_interval() -> None:
+    before = time.time()
+    due_at = _resolve_schedule_create_due_at(
+        due_at=None,
+        delay_seconds=None,
+        interval_seconds=120,
+    )
+    after = time.time()
+    assert before + 119 <= due_at <= after + 121

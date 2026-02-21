@@ -35,6 +35,7 @@ Issues = "https://github.com/caesarnine/lattis/issues"
 lattis = "lattis.cli:main"
 
 [project.entry-points."lattis.agents"]
+binsmith = "lattis.agents.builtins.binsmith:plugin"
 assistant = "lattis.agents.builtins.assistant:plugin"
 poetry = "lattis.agents.builtins.poetry:plugin"
 
