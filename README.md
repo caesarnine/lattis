@@ -23,6 +23,9 @@ Lattis runs the agents on a server. Clients (TUI or browser) connect over HTTP. 
 ## Quick start
 
 ```bash
+# Full local stack (server + scheduler + optional Telegram bridge)
+uvx lattis up
+
 # Local server + TUI
 uvx lattis
 
@@ -110,6 +113,7 @@ my-agent = "my_package:plugin"
 
 ```bash
 lattis                 # TUI (starts a local server)
+lattis up              # Local stack supervisor (server + scheduler + optional Telegram)
 lattis tui             # TUI explicitly
 lattis server          # API server + web UI
 lattis telegram        # Telegram bridge client
@@ -144,7 +148,7 @@ Common options:
 | `LATTIS_DATA_DIR` | `.lattis` | Data directory |
 | `LATTIS_WORKSPACE_DIR` | | Override workspace location |
 | `LATTIS_TELEGRAM_BOT_TOKEN` | | Telegram bot token for `lattis telegram` |
-| `LATTIS_TELEGRAM_SESSION_ID` | `telegram-bot` | Session id used by Telegram bridge |
+| `LATTIS_TELEGRAM_SESSION_ID` | server session id | Session id used by Telegram bridge |
 | `LATTIS_TELEGRAM_THREAD_PREFIX` | `tg` | Thread id prefix per Telegram chat |
 
 ## Requirements

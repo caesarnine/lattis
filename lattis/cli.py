@@ -7,9 +7,11 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TextIO
 from urllib.parse import urlparse
 
 import httpx
@@ -32,7 +34,6 @@ from lattis.settings.env import (
 from lattis.settings.storage import load_storage_config
 from lattis.storage.sqlite import SQLiteSessionStore
 from lattis.telegram import (
-    DEFAULT_TELEGRAM_SESSION_ID,
     DEFAULT_TELEGRAM_THREAD_PREFIX,
     TelegramBotConfig,
     run_telegram_bridge,
@@ -94,6 +95,13 @@ class TuiClientContext:
     local_server: SpawnedServer | None = None
 
 
+@dataclass
+class ManagedProcess:
+    name: str
+    process: subprocess.Popen
+    log_threads: list[threading.Thread] = field(default_factory=list)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     if argv is None:
@@ -118,6 +126,9 @@ def main(argv: list[str] | None = None) -> None:
     if command == "scheduler":
         _run_scheduler_command(args)
         return
+    if command == "up":
+        _run_up_command(args)
+        return
 
     parser.print_help()
 
@@ -137,6 +148,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     scheduler_parser = subparsers.add_parser("scheduler", help="Run scheduled reminder worker")
     _add_scheduler_args(scheduler_parser)
+
+    up_parser = subparsers.add_parser("up", help="Run local stack (server + scheduler + optional Telegram)")
+    _add_up_args(up_parser)
 
     return parser
 
@@ -202,8 +216,11 @@ def _add_telegram_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--session-id",
-        default=read_env(LATTIS_TELEGRAM_SESSION_ID) or DEFAULT_TELEGRAM_SESSION_ID,
-        help=f"Lattis session id for Telegram threads (or {LATTIS_TELEGRAM_SESSION_ID})",
+        default=read_env(LATTIS_TELEGRAM_SESSION_ID),
+        help=(
+            "Lattis session id for Telegram threads "
+            f"(or {LATTIS_TELEGRAM_SESSION_ID}); defaults to the connected server session id"
+        ),
     )
     parser.add_argument(
         "--thread-prefix",
@@ -270,6 +287,89 @@ def _add_scheduler_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_up_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host interface for the local server (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for the local server (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--agent",
+        default=None,
+        help="Default agent id or name",
+    )
+    parser.add_argument(
+        "--agents",
+        default=None,
+        help="Comma-separated agent plugin specs to load",
+    )
+    parser.add_argument(
+        "--no-scheduler",
+        action="store_true",
+        help="Skip the scheduler worker",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=2.0,
+        help="Scheduler poll interval in seconds (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--claim-limit",
+        type=int,
+        default=10,
+        help="Scheduler claim limit per loop (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--lease-seconds",
+        type=int,
+        default=120,
+        help="Scheduler lease duration in seconds (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--retry-seconds",
+        type=int,
+        default=60,
+        help="Scheduler retry delay in seconds (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--telegram",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="Telegram bridge mode: auto (token-based), on, or off (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--telegram-token",
+        default=read_env(LATTIS_TELEGRAM_BOT_TOKEN),
+        help=f"Telegram bot token (or {LATTIS_TELEGRAM_BOT_TOKEN})",
+    )
+    parser.add_argument(
+        "--telegram-session-id",
+        default=read_env(LATTIS_TELEGRAM_SESSION_ID),
+        help=(
+            "Lattis session id for Telegram threads "
+            f"(or {LATTIS_TELEGRAM_SESSION_ID}); defaults to server session id"
+        ),
+    )
+    parser.add_argument(
+        "--telegram-thread-prefix",
+        default=read_env(LATTIS_TELEGRAM_THREAD_PREFIX) or DEFAULT_TELEGRAM_THREAD_PREFIX,
+        help=f"Thread id prefix per chat id (or {LATTIS_TELEGRAM_THREAD_PREFIX})",
+    )
+    parser.add_argument(
+        "--telegram-poll-timeout",
+        type=int,
+        default=30,
+        help="Telegram long-poll timeout in seconds (default: %(default)s)",
+    )
+
+
 def _run_tui_command(args: argparse.Namespace) -> None:
     project_root = Path.cwd()
 
@@ -301,31 +401,46 @@ def _run_telegram_command(args: argparse.Namespace) -> None:
             f"Missing Telegram bot token. Set --token or {LATTIS_TELEGRAM_BOT_TOKEN}."
         )
 
-    session_id = str(getattr(args, "session_id", "") or "").strip() or DEFAULT_TELEGRAM_SESSION_ID
+    configured_session_id = str(getattr(args, "session_id", "") or "").strip()
     thread_prefix = str(getattr(args, "thread_prefix", "") or "").strip() or DEFAULT_TELEGRAM_THREAD_PREFIX
     poll_timeout = max(int(getattr(args, "poll_timeout", 30) or 30), 1)
 
     project_root = Path.cwd()
     context = _create_tui_client(args, project_root=project_root)
     print(context.connection_info.status_message)
-    print(
-        "Telegram bridge ready:"
-        f" session='{session_id}'"
-        f" thread-prefix='{thread_prefix}'"
-        " (send Ctrl+C to stop)."
-    )
 
-    config = TelegramBotConfig(
-        token=token,
-        session_id=session_id,
-        thread_prefix=thread_prefix,
-        poll_timeout=poll_timeout,
-    )
+    async def run_bridge() -> None:
+        session_id = configured_session_id
+        if not session_id:
+            bootstrap = await context.client.bootstrap_session()
+            session_id = bootstrap.session_id.strip()
+            if not session_id:
+                raise RuntimeError("Connected server returned an empty session id.")
+
+        print(
+            "Telegram bridge ready:"
+            f" session='{session_id}'"
+            f" thread-prefix='{thread_prefix}'"
+            " (send Ctrl+C to stop)."
+        )
+
+        config = TelegramBotConfig(
+            token=token,
+            session_id=session_id,
+            thread_prefix=thread_prefix,
+            poll_timeout=poll_timeout,
+        )
+        await run_telegram_bridge(client=context.client, config=config)
 
     try:
-        asyncio.run(run_telegram_bridge(client=context.client, config=config))
+        asyncio.run(run_bridge())
     except KeyboardInterrupt:
         pass
+    except RuntimeError as exc:
+        raise SystemExit(
+            f"Failed to start Telegram bridge: {exc}. "
+            "Pass --session-id to set one explicitly."
+        ) from exc
     finally:
         asyncio.run(context.client.close())
         if context.local_server:
@@ -361,6 +476,236 @@ def _run_scheduler_command(args: argparse.Namespace) -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     asyncio.run(run_scheduler(ctx, scheduler_config))
+
+
+def _run_up_command(args: argparse.Namespace) -> None:
+    host = str(getattr(args, "host", "127.0.0.1") or "127.0.0.1")
+    port = int(getattr(args, "port", 8000) or 8000)
+    server_url = f"http://{host}:{port}"
+    project_root = Path.cwd()
+    agent_spec = getattr(args, "agent", None)
+    agent_specs = _parse_agent_specs(getattr(args, "agents", None))
+
+    env = _build_server_env(
+        project_root=project_root,
+        default_agent=agent_spec,
+        agent_specs=agent_specs,
+    )
+    env.setdefault("PYTHONUNBUFFERED", "1")
+
+    telegram_mode = str(getattr(args, "telegram", "auto") or "auto")
+    telegram_token = str(getattr(args, "telegram_token", "") or "").strip()
+    telegram_session_id = str(getattr(args, "telegram_session_id", "") or "").strip()
+    telegram_thread_prefix = (
+        str(getattr(args, "telegram_thread_prefix", "") or "").strip() or DEFAULT_TELEGRAM_THREAD_PREFIX
+    )
+    telegram_poll_timeout = max(int(getattr(args, "telegram_poll_timeout", 30) or 30), 1)
+    scheduler_enabled = not bool(getattr(args, "no_scheduler", False))
+
+    try:
+        telegram_enabled = _resolve_up_telegram_enabled(mode=telegram_mode, token=telegram_token)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    processes: list[ManagedProcess] = []
+    exit_code = 0
+
+    print(f"[up] Starting local stack at {server_url}...")
+    try:
+        server_cmd = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "lattis.server.asgi:app",
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--log-level",
+            "info",
+        ]
+        server_process = _start_managed_process(
+            name="server",
+            cmd=server_cmd,
+            project_root=project_root,
+            env=env,
+        )
+        processes.append(server_process)
+
+        if not _wait_for_server(server_url, server_process.process, timeout=15.0):
+            code = server_process.process.poll()
+            if code is None:
+                raise RuntimeError("Server failed to start (timeout).")
+            raise RuntimeError(f"Server failed to start (exit code {code}).")
+        print(f"[up] server ready at {server_url}")
+
+        if scheduler_enabled:
+            scheduler_cmd = [
+                sys.executable,
+                "-m",
+                "lattis",
+                "scheduler",
+                "--poll-interval",
+                str(max(0.1, float(getattr(args, "poll_interval", 2.0) or 2.0))),
+                "--claim-limit",
+                str(max(1, int(getattr(args, "claim_limit", 10) or 10))),
+                "--lease-seconds",
+                str(max(1, int(getattr(args, "lease_seconds", 120) or 120))),
+                "--retry-seconds",
+                str(max(1, int(getattr(args, "retry_seconds", 60) or 60))),
+                "--telegram-token",
+                telegram_token,
+                "--telegram-thread-prefix",
+                telegram_thread_prefix,
+            ]
+            processes.append(
+                _start_managed_process(
+                    name="scheduler",
+                    cmd=scheduler_cmd,
+                    project_root=project_root,
+                    env=env,
+                )
+            )
+        else:
+            print("[up] scheduler disabled by --no-scheduler")
+
+        if telegram_enabled:
+            telegram_cmd = [
+                sys.executable,
+                "-m",
+                "lattis",
+                "telegram",
+                "--server",
+                server_url,
+                "--token",
+                telegram_token,
+                "--thread-prefix",
+                telegram_thread_prefix,
+                "--poll-timeout",
+                str(telegram_poll_timeout),
+            ]
+            if telegram_session_id:
+                telegram_cmd.extend(["--session-id", telegram_session_id])
+            processes.append(
+                _start_managed_process(
+                    name="telegram",
+                    cmd=telegram_cmd,
+                    project_root=project_root,
+                    env=env,
+                )
+            )
+        elif telegram_mode == "auto":
+            print("[up] telegram disabled (no token configured)")
+        else:
+            print("[up] telegram disabled by --telegram off")
+
+        print("[up] Running. Press Ctrl+C to stop.")
+        exited, code = _wait_for_any_process_exit(processes)
+        if code != 0:
+            print(f"[up] {exited.name} exited with code {code}; shutting down.")
+            exit_code = code
+        else:
+            print(f"[up] {exited.name} exited; shutting down.")
+    except KeyboardInterrupt:
+        print("\n[up] stopping...")
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    finally:
+        _stop_managed_processes(processes)
+
+    if exit_code:
+        raise SystemExit(exit_code)
+
+
+def _resolve_up_telegram_enabled(*, mode: str, token: str) -> bool:
+    choice = mode.strip().lower()
+    if choice not in {"auto", "on", "off"}:
+        raise ValueError("Invalid --telegram mode. Use auto, on, or off.")
+    if choice == "off":
+        return False
+    if choice == "on":
+        if not token.strip():
+            raise ValueError(
+                "Telegram mode is 'on' but no token was provided. "
+                f"Set --telegram-token or {LATTIS_TELEGRAM_BOT_TOKEN}."
+            )
+        return True
+    return bool(token.strip())
+
+
+def _start_managed_process(
+    *,
+    name: str,
+    cmd: list[str],
+    project_root: Path,
+    env: dict[str, str],
+) -> ManagedProcess:
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(project_root),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    log_threads: list[threading.Thread] = []
+    if process.stdout is not None:
+        thread = threading.Thread(
+            target=_pump_prefixed_output,
+            args=(name, process.stdout),
+            daemon=True,
+        )
+        thread.start()
+        log_threads.append(thread)
+    return ManagedProcess(name=name, process=process, log_threads=log_threads)
+
+
+def _pump_prefixed_output(name: str, stream: TextIO) -> None:
+    try:
+        for line in stream:
+            text = line.rstrip()
+            if not text:
+                continue
+            print(f"[{name}] {text}")
+    finally:
+        stream.close()
+
+
+def _wait_for_any_process_exit(processes: list[ManagedProcess]) -> tuple[ManagedProcess, int]:
+    while True:
+        for item in processes:
+            code = item.process.poll()
+            if code is not None:
+                return item, code
+        time.sleep(0.2)
+
+
+def _stop_managed_processes(processes: list[ManagedProcess], timeout: float = 5.0) -> None:
+    if not processes:
+        return
+    for item in processes:
+        if item.process.poll() is None:
+            item.process.terminate()
+
+    deadline = time.monotonic() + timeout
+    for item in processes:
+        if item.process.poll() is not None:
+            continue
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            item.process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            pass
+
+    for item in processes:
+        if item.process.poll() is None:
+            item.process.kill()
+
+    for item in processes:
+        for thread in item.log_threads:
+            thread.join(timeout=1.0)
 
 
 def _normalize_server_url(url: str) -> str:

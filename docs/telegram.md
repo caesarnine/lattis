@@ -8,8 +8,9 @@ How thread mapping works
 ------------------------
 
 - One Telegram chat maps to one persistent Lattis thread.
-- Session id defaults to `telegram-bot` (override with `--session-id` or
-  `LATTIS_TELEGRAM_SESSION_ID`).
+- Session id defaults to the connected server's session id (same session used by
+  TUI/Web by default). Override with `--session-id` or
+  `LATTIS_TELEGRAM_SESSION_ID`.
 - Thread id is generated as `<thread-prefix>-<chat-id>` where the default
   prefix is `tg` (override with `--thread-prefix` or
   `LATTIS_TELEGRAM_THREAD_PREFIX`).
@@ -20,6 +21,11 @@ Run
 ---
 
 ```bash
+# Single command stack (server + scheduler + Telegram if token is set)
+export LATTIS_TELEGRAM_BOT_TOKEN=...
+uvx lattis up
+
+# Or run components separately:
 export LATTIS_TELEGRAM_BOT_TOKEN=...
 uvx lattis server
 uvx lattis telegram --server http://127.0.0.1:8000
