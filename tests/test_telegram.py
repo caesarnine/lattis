@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from pydantic_ai.ui.vercel_ai.request_types import FileUIPart, TextUIPart
 
 from lattis.telegram import (
     build_run_input,
     chat_id_for_thread_id,
     collect_assistant_text,
+    extract_telegram_media_refs,
+    normalize_media_type,
     split_telegram_message,
+    to_data_url,
     thread_id_for_chat,
 )
 
@@ -44,6 +48,64 @@ def test_build_run_input_sets_session_and_thread() -> None:
     assert run_input.session_id == "s1"
     assert run_input.thread_id == "t1"
     assert run_input.messages[0].role == "user"
+
+
+def test_build_run_input_accepts_file_parts() -> None:
+    run_input = build_run_input(
+        parts=[
+            TextUIPart(text="describe this"),
+            FileUIPart(media_type="image/jpeg", url="data:image/jpeg;base64,AAA="),
+        ],
+        session_id="s1",
+        thread_id="t1",
+    )
+    assert run_input.messages[0].parts[0].type == "text"
+    assert run_input.messages[0].parts[1].type == "file"
+
+
+def test_build_run_input_requires_content() -> None:
+    with pytest.raises(ValueError, match="At least one user message part is required"):
+        build_run_input(session_id="s1", thread_id="t1")
+
+
+def test_extract_telegram_media_refs_photo_prefers_largest() -> None:
+    message = {
+        "photo": [
+            {"file_id": "small", "file_size": 100},
+            {"file_id": "large", "file_size": 2000},
+        ]
+    }
+    refs = extract_telegram_media_refs(message)
+    assert len(refs) == 1
+    assert refs[0].file_id == "large"
+    assert refs[0].media_type == "image/jpeg"
+
+
+def test_extract_telegram_media_refs_audio_video_document() -> None:
+    message = {
+        "video": {"file_id": "vid", "mime_type": "video/mp4", "file_size": 111},
+        "audio": {"file_id": "aud", "mime_type": "audio/mpeg", "file_size": 222},
+        "voice": {"file_id": "voc", "mime_type": "audio/ogg", "file_size": 333},
+        "document": {
+            "file_id": "doc",
+            "file_name": "notes.pdf",
+            "mime_type": "application/pdf",
+            "file_size": 444,
+        },
+    }
+    refs = extract_telegram_media_refs(message)
+    assert [item.file_id for item in refs] == ["vid", "voc", "aud", "doc"]
+    assert [item.media_type for item in refs] == ["video/mp4", "audio/ogg", "audio/mpeg", "application/pdf"]
+
+
+def test_normalize_media_type_uses_filename_for_octet_stream() -> None:
+    assert normalize_media_type("application/octet-stream", filename="photo.png") == "image/png"
+    assert normalize_media_type("application/octet-stream", filename=None) == "application/octet-stream"
+
+
+def test_to_data_url_has_expected_prefix() -> None:
+    url = to_data_url(b"hello", media_type="text/plain")
+    assert url.startswith("data:text/plain;base64,")
 
 
 def test_collect_assistant_text_from_stream_events() -> None:

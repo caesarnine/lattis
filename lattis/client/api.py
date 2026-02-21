@@ -176,7 +176,15 @@ class AgentClient:
     async def run_stream(self, run_input: RequestData) -> AsyncIterator[dict]:
         payload = run_input.model_dump(mode="json", by_alias=True, exclude_none=True)
         headers = {"accept": "text/event-stream"}
-        async with self._client.stream("POST", "/ui/chat", json=payload, headers=headers) as response:
+        # Streaming model runs can legitimately take longer than the default client timeout,
+        # especially for multimodal inputs (audio/video/image). Disable request timeout here.
+        async with self._client.stream(
+            "POST",
+            "/ui/chat",
+            json=payload,
+            headers=headers,
+            timeout=None,
+        ) as response:
             await self._raise_for_status_async(response, "Failed to run agent")
             async for event in iter_ui_events(response.aiter_lines()):
                 yield event

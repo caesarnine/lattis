@@ -17,6 +17,14 @@ How thread mapping works
 
 This gives each chat a cohesive "single texting thread" history.
 
+Supported inputs include:
+
+- text messages
+- photos/images (with optional caption)
+- voice/audio messages
+- videos/video notes
+- documents (treated as file inputs)
+
 Run
 ---
 
