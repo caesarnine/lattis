@@ -28,16 +28,11 @@ from lattis.settings.env import (
     LATTIS_SERVER_URL,
     LATTIS_TELEGRAM_BOT_TOKEN,
     LATTIS_TELEGRAM_SESSION_ID,
-    LATTIS_TELEGRAM_THREAD_PREFIX,
     read_env,
 )
 from lattis.settings.storage import load_storage_config
 from lattis.storage.sqlite import SQLiteSessionStore
-from lattis.telegram import (
-    DEFAULT_TELEGRAM_THREAD_PREFIX,
-    TelegramBotConfig,
-    run_telegram_bridge,
-)
+from lattis.channels.telegram import TelegramBotConfig, run_telegram_bridge
 from lattis.tui.app import run_tui
 
 DEFAULT_SERVER_URL = read_env(LATTIS_SERVER_URL)
@@ -223,11 +218,6 @@ def _add_telegram_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
-        "--thread-prefix",
-        default=read_env(LATTIS_TELEGRAM_THREAD_PREFIX) or DEFAULT_TELEGRAM_THREAD_PREFIX,
-        help=f"Thread id prefix per chat id (or {LATTIS_TELEGRAM_THREAD_PREFIX})",
-    )
-    parser.add_argument(
         "--poll-timeout",
         type=int,
         default=30,
@@ -271,6 +261,30 @@ def _add_scheduler_args(parser: argparse.ArgumentParser) -> None:
         help="Retry delay after failures (default: %(default)s)",
     )
     parser.add_argument(
+        "--outbox-claim-limit",
+        type=int,
+        default=25,
+        help="Maximum queued notifications claimed per loop (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--outbox-lease-seconds",
+        type=int,
+        default=120,
+        help="Lease time for claimed notifications (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--outbox-retry-seconds",
+        type=int,
+        default=60,
+        help="Retry delay for failed notification delivery (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--outbox-max-attempts",
+        type=int,
+        default=5,
+        help="Maximum delivery attempts before marking dead (default: %(default)s)",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="Run one scheduling pass and exit",
@@ -279,11 +293,6 @@ def _add_scheduler_args(parser: argparse.ArgumentParser) -> None:
         "--telegram-token",
         default=read_env(LATTIS_TELEGRAM_BOT_TOKEN),
         help=f"Telegram bot token for proactive delivery (or {LATTIS_TELEGRAM_BOT_TOKEN})",
-    )
-    parser.add_argument(
-        "--telegram-thread-prefix",
-        default=read_env(LATTIS_TELEGRAM_THREAD_PREFIX) or DEFAULT_TELEGRAM_THREAD_PREFIX,
-        help=f"Thread id prefix used for Telegram mapping (or {LATTIS_TELEGRAM_THREAD_PREFIX})",
     )
 
 
@@ -339,6 +348,30 @@ def _add_up_args(parser: argparse.ArgumentParser) -> None:
         help="Scheduler retry delay in seconds (default: %(default)s)",
     )
     parser.add_argument(
+        "--outbox-claim-limit",
+        type=int,
+        default=25,
+        help="Notification outbox claim limit per loop (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--outbox-lease-seconds",
+        type=int,
+        default=120,
+        help="Notification outbox lease duration in seconds (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--outbox-retry-seconds",
+        type=int,
+        default=60,
+        help="Notification outbox retry delay in seconds (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--outbox-max-attempts",
+        type=int,
+        default=5,
+        help="Notification outbox max delivery attempts (default: %(default)s)",
+    )
+    parser.add_argument(
         "--telegram",
         choices=("auto", "on", "off"),
         default="auto",
@@ -356,11 +389,6 @@ def _add_up_args(parser: argparse.ArgumentParser) -> None:
             "Lattis session id for Telegram threads "
             f"(or {LATTIS_TELEGRAM_SESSION_ID}); defaults to server session id"
         ),
-    )
-    parser.add_argument(
-        "--telegram-thread-prefix",
-        default=read_env(LATTIS_TELEGRAM_THREAD_PREFIX) or DEFAULT_TELEGRAM_THREAD_PREFIX,
-        help=f"Thread id prefix per chat id (or {LATTIS_TELEGRAM_THREAD_PREFIX})",
     )
     parser.add_argument(
         "--telegram-poll-timeout",
@@ -402,7 +430,6 @@ def _run_telegram_command(args: argparse.Namespace) -> None:
         )
 
     configured_session_id = str(getattr(args, "session_id", "") or "").strip()
-    thread_prefix = str(getattr(args, "thread_prefix", "") or "").strip() or DEFAULT_TELEGRAM_THREAD_PREFIX
     poll_timeout = max(int(getattr(args, "poll_timeout", 30) or 30), 1)
 
     project_root = Path.cwd()
@@ -420,14 +447,12 @@ def _run_telegram_command(args: argparse.Namespace) -> None:
         print(
             "Telegram bridge ready:"
             f" session='{session_id}'"
-            f" thread-prefix='{thread_prefix}'"
             " (send Ctrl+C to stop)."
         )
 
         config = TelegramBotConfig(
             token=token,
             session_id=session_id,
-            thread_prefix=thread_prefix,
             poll_timeout=poll_timeout,
         )
         await run_telegram_bridge(client=context.client, config=config)
@@ -468,10 +493,10 @@ def _run_scheduler_command(args: argparse.Namespace) -> None:
         retry_delay_seconds=max(1, int(getattr(args, "retry_seconds", 60) or 60)),
         run_once=bool(getattr(args, "once", False)),
         telegram_bot_token=str(getattr(args, "telegram_token", "") or "").strip() or None,
-        telegram_thread_prefix=str(
-            getattr(args, "telegram_thread_prefix", "") or DEFAULT_TELEGRAM_THREAD_PREFIX
-        ).strip()
-        or DEFAULT_TELEGRAM_THREAD_PREFIX,
+        outbox_claim_limit=max(1, int(getattr(args, "outbox_claim_limit", 25) or 25)),
+        outbox_lease_seconds=max(1, int(getattr(args, "outbox_lease_seconds", 120) or 120)),
+        outbox_retry_delay_seconds=max(1, int(getattr(args, "outbox_retry_seconds", 60) or 60)),
+        outbox_max_attempts=max(1, int(getattr(args, "outbox_max_attempts", 5) or 5)),
     )
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -496,9 +521,6 @@ def _run_up_command(args: argparse.Namespace) -> None:
     telegram_mode = str(getattr(args, "telegram", "auto") or "auto")
     telegram_token = str(getattr(args, "telegram_token", "") or "").strip()
     telegram_session_id = str(getattr(args, "telegram_session_id", "") or "").strip()
-    telegram_thread_prefix = (
-        str(getattr(args, "telegram_thread_prefix", "") or "").strip() or DEFAULT_TELEGRAM_THREAD_PREFIX
-    )
     telegram_poll_timeout = max(int(getattr(args, "telegram_poll_timeout", 30) or 30), 1)
     scheduler_enabled = not bool(getattr(args, "no_scheduler", False))
 
@@ -553,10 +575,16 @@ def _run_up_command(args: argparse.Namespace) -> None:
                 str(max(1, int(getattr(args, "lease_seconds", 120) or 120))),
                 "--retry-seconds",
                 str(max(1, int(getattr(args, "retry_seconds", 60) or 60))),
+                "--outbox-claim-limit",
+                str(max(1, int(getattr(args, "outbox_claim_limit", 25) or 25))),
+                "--outbox-lease-seconds",
+                str(max(1, int(getattr(args, "outbox_lease_seconds", 120) or 120))),
+                "--outbox-retry-seconds",
+                str(max(1, int(getattr(args, "outbox_retry_seconds", 60) or 60))),
+                "--outbox-max-attempts",
+                str(max(1, int(getattr(args, "outbox_max_attempts", 5) or 5))),
                 "--telegram-token",
                 telegram_token,
-                "--telegram-thread-prefix",
-                telegram_thread_prefix,
             ]
             processes.append(
                 _start_managed_process(
@@ -579,8 +607,6 @@ def _run_up_command(args: argparse.Namespace) -> None:
                 server_url,
                 "--token",
                 telegram_token,
-                "--thread-prefix",
-                telegram_thread_prefix,
                 "--poll-timeout",
                 str(telegram_poll_timeout),
             ]

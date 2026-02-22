@@ -24,14 +24,12 @@ logger = logging.getLogger(__name__)
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 TELEGRAM_DEFAULT_MAX_MEDIA_BYTES = 20 * 1024 * 1024
 DEFAULT_TELEGRAM_SESSION_ID = "telegram-bot"
-DEFAULT_TELEGRAM_THREAD_PREFIX = "tg"
 
 
 @dataclass(frozen=True)
 class TelegramBotConfig:
     token: str
     session_id: str = DEFAULT_TELEGRAM_SESSION_ID
-    thread_prefix: str = DEFAULT_TELEGRAM_THREAD_PREFIX
     poll_timeout: int = 30
     max_media_bytes: int = TELEGRAM_DEFAULT_MAX_MEDIA_BYTES
     telegram_api_base: str = "https://api.telegram.org"
@@ -39,6 +37,45 @@ class TelegramBotConfig:
     @property
     def telegram_base_url(self) -> str:
         return f"{self.telegram_api_base.rstrip('/')}/bot{self.token}"
+
+
+class TelegramChannelAdapter:
+    channel = "telegram"
+
+    def __init__(
+        self,
+        *,
+        token: str,
+        telegram_api_base: str = "https://api.telegram.org",
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self.token = token
+        self.telegram_api_base = telegram_api_base
+        self._client = client or httpx.AsyncClient(
+            base_url=f"{telegram_api_base.rstrip('/')}/bot{token}",
+            timeout=httpx.Timeout(40.0, connect=10.0),
+        )
+        self._owns_client = client is None
+
+    async def close(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+    async def send_text(self, *, external_conversation_id: str, text: str) -> None:
+        chat_id = _parse_telegram_chat_id(external_conversation_id)
+        for chunk in split_telegram_message(text):
+            response = await self._client.post(
+                "/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": chunk,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get("ok") is not True:
+                detail = payload.get("description") if isinstance(payload, dict) else None
+                raise RuntimeError(str(detail or "Telegram sendMessage failed."))
 
 
 @dataclass
@@ -106,7 +143,7 @@ class TelegramBotBridge:
         )
         self._owns_telegram_client = telegram_client is None
         self._chat_locks: dict[int, asyncio.Lock] = {}
-        self._known_threads: set[str] = set()
+        self._chat_threads: dict[int, str] = {}
         self._offset: int | None = None
 
     async def close(self) -> None:
@@ -115,9 +152,8 @@ class TelegramBotBridge:
 
     async def run_forever(self) -> None:
         logger.info(
-            "starting telegram bridge session=%s thread_prefix=%s",
+            "starting telegram bridge session=%s",
             self.config.session_id,
-            self.config.thread_prefix,
         )
         try:
             while True:
@@ -185,15 +221,14 @@ class TelegramBotBridge:
         message: dict[str, object],
         command: str | None,
     ) -> None:
-        thread_id = thread_id_for_chat(chat_id, prefix=self.config.thread_prefix)
-        await self._ensure_thread(thread_id)
+        thread_id = await self._resolve_thread_for_chat(chat_id, message=message)
 
         if command in {"/start", "/help"}:
             await self._send_message(
                 chat_id,
                 (
                     "Connected to Lattis.\n"
-                    f"This chat uses thread '{thread_id}'.\n"
+                    f"This chat is bound to thread '{thread_id}'.\n"
                     "Send text, images, audio, or video to chat with the active agent.\n"
                     "Use /clear to reset this thread."
                 ),
@@ -268,16 +303,43 @@ class TelegramBotBridge:
             url=to_data_url(blob, media_type=media_type),
         )
 
-    async def _ensure_thread(self, thread_id: str) -> None:
-        if thread_id in self._known_threads:
-            return
-        try:
-            await self.agent_client.create_thread(self.config.session_id, thread_id)
-        except RuntimeError as exc:
-            detail = str(exc).lower()
-            if "already exists" not in detail:
-                raise
-        self._known_threads.add(thread_id)
+    async def _resolve_thread_for_chat(self, chat_id: int, *, message: dict[str, object]) -> str:
+        cached = self._chat_threads.get(chat_id)
+        if cached:
+            return cached
+
+        sender = message.get("from")
+        sender_id: str | None = None
+        if isinstance(sender, dict):
+            raw_sender_id = sender.get("id")
+            if isinstance(raw_sender_id, int):
+                sender_id = str(raw_sender_id)
+
+        chat = message.get("chat")
+        metadata: dict[str, object] | None = None
+        if isinstance(chat, dict):
+            metadata = {}
+            chat_type = _as_non_empty_string(chat.get("type"))
+            chat_title = _as_non_empty_string(chat.get("title"))
+            chat_username = _as_non_empty_string(chat.get("username"))
+            if chat_type:
+                metadata["chat_type"] = chat_type
+            if chat_title:
+                metadata["chat_title"] = chat_title
+            if chat_username:
+                metadata["chat_username"] = chat_username
+            if not metadata:
+                metadata = None
+
+        resolved = await self.agent_client.resolve_channel_thread(
+            channel="telegram",
+            session_id=self.config.session_id,
+            external_conversation_id=str(chat_id),
+            external_user_id=sender_id,
+            metadata=metadata,
+        )
+        self._chat_threads[chat_id] = resolved.thread_id
+        return resolved.thread_id
 
     async def _send_typing(self, chat_id: int) -> None:
         try:
@@ -524,25 +586,13 @@ def split_telegram_message(
     return chunks
 
 
-def thread_id_for_chat(chat_id: int, *, prefix: str = DEFAULT_TELEGRAM_THREAD_PREFIX) -> str:
-    normalized = str(chat_id).strip()
-    if normalized.startswith("-"):
-        normalized = f"m{normalized[1:]}"
-    return f"{prefix}-{normalized}"
-
-
-def chat_id_for_thread_id(thread_id: str, *, prefix: str = DEFAULT_TELEGRAM_THREAD_PREFIX) -> int | None:
-    marker = f"{prefix}-"
-    if not thread_id.startswith(marker):
-        return None
-    raw = thread_id[len(marker) :].strip()
-    if not raw:
-        return None
-    if raw.startswith("m") and raw[1:].isdigit():
-        return -int(raw[1:])
-    if raw.isdigit():
-        return int(raw)
-    return None
+def _parse_telegram_chat_id(value: str) -> int:
+    normalized = value.strip()
+    if normalized.startswith("-") and normalized[1:].isdigit():
+        return -int(normalized[1:])
+    if normalized.isdigit():
+        return int(normalized)
+    raise ValueError(f"Invalid Telegram conversation id '{value}'.")
 
 
 async def run_telegram_bridge(*, client: AgentClient, config: TelegramBotConfig) -> None:

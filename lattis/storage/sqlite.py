@@ -4,11 +4,19 @@ import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from pydantic_ai.messages import ModelMessage
 
+from lattis.domain.channels import ChannelBindingRecord
 from lattis.domain.messages import dump_messages, load_messages
+from lattis.domain.outbox import (
+    OUTBOX_STATUS_DEAD,
+    OUTBOX_STATUS_LEASED,
+    OUTBOX_STATUS_QUEUED,
+    OUTBOX_STATUS_SENT,
+    NotificationOutboxRecord,
+)
 from lattis.domain.schedules import (
     SCHEDULE_RUN_STATUS_RUNNING,
     SCHEDULE_STATUS_CANCELED,
@@ -92,6 +100,18 @@ class SQLiteSessionStore(SessionStore):
                 "DELETE FROM schedules WHERE session_id = ? AND thread_id = ?",
                 (session_id, thread_id),
             )
+            conn.execute(
+                "DELETE FROM schedule_runs WHERE session_id = ? AND thread_id = ?",
+                (session_id, thread_id),
+            )
+            conn.execute(
+                "DELETE FROM channel_bindings WHERE session_id = ? AND thread_id = ?",
+                (session_id, thread_id),
+            )
+            conn.execute(
+                "DELETE FROM notification_outbox WHERE session_id = ? AND thread_id = ?",
+                (session_id, thread_id),
+            )
             remaining = conn.execute(
                 "SELECT 1 FROM threads WHERE session_id = ? LIMIT 1",
                 (session_id,),
@@ -111,6 +131,18 @@ class SQLiteSessionStore(SessionStore):
                 )
                 conn.execute(
                     "DELETE FROM schedules WHERE session_id = ?",
+                    (session_id,),
+                )
+                conn.execute(
+                    "DELETE FROM schedule_runs WHERE session_id = ?",
+                    (session_id,),
+                )
+                conn.execute(
+                    "DELETE FROM channel_bindings WHERE session_id = ?",
+                    (session_id,),
+                )
+                conn.execute(
+                    "DELETE FROM notification_outbox WHERE session_id = ?",
                     (session_id,),
                 )
 
@@ -184,6 +216,352 @@ class SQLiteSessionStore(SessionStore):
                 """,
                 (session_id, thread_id, now, now, settings_json),
             )
+
+    # ------------------------------------------------------------------
+    # Channel bindings
+    # ------------------------------------------------------------------
+
+    def get_channel_binding_record(
+        self,
+        *,
+        channel: str,
+        external_conversation_id: str,
+    ) -> ChannelBindingRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM channel_bindings
+                WHERE channel = ? AND external_conversation_id = ?
+                LIMIT 1
+                """,
+                (channel, external_conversation_id),
+            ).fetchone()
+        return self._channel_binding_from_row(row) if row else None
+
+    def upsert_channel_binding_record(
+        self,
+        *,
+        binding_id: str,
+        session_id: str,
+        thread_id: str,
+        channel: str,
+        external_conversation_id: str,
+        external_user_id: str | None,
+        metadata_json: dict[str, Any] | None,
+        updated_at: float,
+    ) -> ChannelBindingRecord:
+        metadata_blob = (
+            json.dumps(metadata_json, ensure_ascii=True, separators=(",", ":"))
+            if metadata_json is not None
+            else None
+        )
+        with self._connect() as conn:
+            self._touch_session(conn, session_id, now=updated_at)
+            self._touch_thread(conn, session_id, thread_id, now=updated_at)
+            conn.execute(
+                """
+                INSERT INTO channel_bindings (
+                    binding_id,
+                    session_id,
+                    thread_id,
+                    channel,
+                    external_conversation_id,
+                    external_user_id,
+                    metadata_json,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(channel, external_conversation_id) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    thread_id = excluded.thread_id,
+                    external_user_id = excluded.external_user_id,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    binding_id,
+                    session_id,
+                    thread_id,
+                    channel,
+                    external_conversation_id,
+                    external_user_id,
+                    metadata_blob,
+                    updated_at,
+                    updated_at,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM channel_bindings
+                WHERE channel = ? AND external_conversation_id = ?
+                LIMIT 1
+                """,
+                (channel, external_conversation_id),
+            ).fetchone()
+        assert row is not None
+        return self._channel_binding_from_row(row)
+
+    def list_thread_channel_bindings(
+        self,
+        *,
+        session_id: str,
+        thread_id: str,
+    ) -> list[ChannelBindingRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM channel_bindings
+                WHERE session_id = ? AND thread_id = ?
+                ORDER BY created_at ASC
+                """,
+                (session_id, thread_id),
+            ).fetchall()
+        return [self._channel_binding_from_row(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Notification outbox
+    # ------------------------------------------------------------------
+
+    def enqueue_notification_outbox_record(
+        self,
+        *,
+        outbox_id: str,
+        session_id: str,
+        thread_id: str,
+        schedule_id: str | None,
+        schedule_run_id: str | None,
+        channel: str,
+        external_conversation_id: str,
+        payload_json: dict[str, Any],
+        dedupe_key: str,
+        available_at: float,
+        created_at: float,
+    ) -> NotificationOutboxRecord:
+        payload_blob = json.dumps(payload_json, ensure_ascii=True, separators=(",", ":"))
+        with self._connect() as conn:
+            self._touch_session(conn, session_id, now=created_at)
+            self._touch_thread(conn, session_id, thread_id, now=created_at)
+            conn.execute(
+                """
+                INSERT INTO notification_outbox (
+                    outbox_id,
+                    session_id,
+                    thread_id,
+                    schedule_id,
+                    schedule_run_id,
+                    channel,
+                    external_conversation_id,
+                    payload_json,
+                    dedupe_key,
+                    status,
+                    attempt_count,
+                    available_at,
+                    lease_expires_at,
+                    last_error,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, NULL, ?, ?)
+                ON CONFLICT(dedupe_key) DO NOTHING
+                """,
+                (
+                    outbox_id,
+                    session_id,
+                    thread_id,
+                    schedule_id,
+                    schedule_run_id,
+                    channel,
+                    external_conversation_id,
+                    payload_blob,
+                    dedupe_key,
+                    OUTBOX_STATUS_QUEUED,
+                    available_at,
+                    created_at,
+                    created_at,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM notification_outbox
+                WHERE dedupe_key = ?
+                LIMIT 1
+                """,
+                (dedupe_key,),
+            ).fetchone()
+        assert row is not None
+        return self._outbox_from_row(row)
+
+    def claim_notification_outbox_records(
+        self,
+        *,
+        now: float,
+        limit: int,
+        lease_seconds: int,
+    ) -> list[NotificationOutboxRecord]:
+        bounded_limit = max(1, min(limit, 100))
+        lease_expires_at = now + max(1, lease_seconds)
+        claimed_rows: list[sqlite3.Row] = []
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM notification_outbox
+                WHERE (
+                    (status = ? AND available_at <= ?)
+                    OR (status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+                )
+                ORDER BY available_at ASC, created_at ASC
+                LIMIT ?
+                """,
+                (
+                    OUTBOX_STATUS_QUEUED,
+                    now,
+                    OUTBOX_STATUS_LEASED,
+                    now,
+                    bounded_limit,
+                ),
+            ).fetchall()
+
+            for row in rows:
+                outbox_id = str(row["outbox_id"])
+                cursor = conn.execute(
+                    """
+                    UPDATE notification_outbox
+                    SET status = ?,
+                        lease_expires_at = ?,
+                        attempt_count = attempt_count + 1,
+                        updated_at = ?
+                    WHERE outbox_id = ?
+                      AND (
+                        (status = ? AND available_at <= ?)
+                        OR (status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+                      )
+                    """,
+                    (
+                        OUTBOX_STATUS_LEASED,
+                        lease_expires_at,
+                        now,
+                        outbox_id,
+                        OUTBOX_STATUS_QUEUED,
+                        now,
+                        OUTBOX_STATUS_LEASED,
+                        now,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    continue
+                claimed = conn.execute(
+                    "SELECT * FROM notification_outbox WHERE outbox_id = ?",
+                    (outbox_id,),
+                ).fetchone()
+                if claimed is not None:
+                    claimed_rows.append(claimed)
+
+        return [self._outbox_from_row(row) for row in claimed_rows]
+
+    def mark_notification_outbox_record_sent(
+        self,
+        *,
+        outbox_id: str,
+        sent_at: float,
+    ) -> NotificationOutboxRecord | None:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE notification_outbox
+                SET status = ?,
+                    lease_expires_at = NULL,
+                    last_error = NULL,
+                    updated_at = ?
+                WHERE outbox_id = ?
+                  AND status = ?
+                """,
+                (
+                    OUTBOX_STATUS_SENT,
+                    sent_at,
+                    outbox_id,
+                    OUTBOX_STATUS_LEASED,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT * FROM notification_outbox WHERE outbox_id = ?",
+                (outbox_id,),
+            ).fetchone()
+        return self._outbox_from_row(row) if row else None
+
+    def mark_notification_outbox_record_retry(
+        self,
+        *,
+        outbox_id: str,
+        retry_at: float,
+        failed_at: float,
+        error: str,
+    ) -> NotificationOutboxRecord | None:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE notification_outbox
+                SET status = ?,
+                    available_at = ?,
+                    lease_expires_at = NULL,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE outbox_id = ?
+                  AND status = ?
+                """,
+                (
+                    OUTBOX_STATUS_QUEUED,
+                    retry_at,
+                    error,
+                    failed_at,
+                    outbox_id,
+                    OUTBOX_STATUS_LEASED,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT * FROM notification_outbox WHERE outbox_id = ?",
+                (outbox_id,),
+            ).fetchone()
+        return self._outbox_from_row(row) if row else None
+
+    def mark_notification_outbox_record_dead(
+        self,
+        *,
+        outbox_id: str,
+        failed_at: float,
+        error: str,
+    ) -> NotificationOutboxRecord | None:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE notification_outbox
+                SET status = ?,
+                    lease_expires_at = NULL,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE outbox_id = ?
+                  AND status = ?
+                """,
+                (
+                    OUTBOX_STATUS_DEAD,
+                    error,
+                    failed_at,
+                    outbox_id,
+                    OUTBOX_STATUS_LEASED,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT * FROM notification_outbox WHERE outbox_id = ?",
+                (outbox_id,),
+            ).fetchone()
+        return self._outbox_from_row(row) if row else None
 
     # ------------------------------------------------------------------
     # Scheduling
@@ -705,6 +1083,62 @@ class SQLiteSessionStore(SessionStore):
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS channel_bindings (
+                    binding_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    external_conversation_id TEXT NOT NULL,
+                    external_user_id TEXT,
+                    metadata_json TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(channel, external_conversation_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_channel_bindings_thread
+                ON channel_bindings(session_id, thread_id, created_at)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notification_outbox (
+                    outbox_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    schedule_id TEXT,
+                    schedule_run_id TEXT,
+                    channel TEXT NOT NULL,
+                    external_conversation_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    dedupe_key TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    available_at REAL NOT NULL,
+                    lease_expires_at REAL,
+                    last_error TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_notification_outbox_status
+                ON notification_outbox(status, available_at)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_notification_outbox_thread
+                ON notification_outbox(session_id, thread_id, created_at)
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS schedules (
                     schedule_id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
@@ -810,6 +1244,61 @@ class SQLiteSessionStore(SessionStore):
                 messages = excluded.messages
             """,
             (session_id, thread_id, now, now, messages_blob),
+        )
+
+    @staticmethod
+    def _channel_binding_from_row(row: sqlite3.Row) -> ChannelBindingRecord:
+        metadata_json: dict[str, Any] | None = None
+        raw_metadata = row["metadata_json"] if "metadata_json" in row.keys() else None
+        if isinstance(raw_metadata, str) and raw_metadata:
+            try:
+                loaded = json.loads(raw_metadata)
+                if isinstance(loaded, dict):
+                    metadata_json = loaded
+            except Exception:
+                metadata_json = None
+
+        return ChannelBindingRecord(
+            binding_id=str(row["binding_id"]),
+            session_id=str(row["session_id"]),
+            thread_id=str(row["thread_id"]),
+            channel=str(row["channel"]),
+            external_conversation_id=str(row["external_conversation_id"]),
+            external_user_id=str(row["external_user_id"]) if row["external_user_id"] is not None else None,
+            metadata_json=metadata_json,
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _outbox_from_row(row: sqlite3.Row) -> NotificationOutboxRecord:
+        payload_json: dict[str, Any] = {}
+        raw_payload = row["payload_json"] if "payload_json" in row.keys() else None
+        if isinstance(raw_payload, str) and raw_payload:
+            try:
+                loaded = json.loads(raw_payload)
+                if isinstance(loaded, dict):
+                    payload_json = loaded
+            except Exception:
+                payload_json = {}
+
+        return NotificationOutboxRecord(
+            outbox_id=str(row["outbox_id"]),
+            session_id=str(row["session_id"]),
+            thread_id=str(row["thread_id"]),
+            schedule_id=str(row["schedule_id"]) if row["schedule_id"] is not None else None,
+            schedule_run_id=str(row["schedule_run_id"]) if row["schedule_run_id"] is not None else None,
+            channel=str(row["channel"]),
+            external_conversation_id=str(row["external_conversation_id"]),
+            payload_json=payload_json,
+            dedupe_key=str(row["dedupe_key"]),
+            status=str(row["status"]),
+            attempt_count=int(row["attempt_count"]),
+            available_at=float(row["available_at"]),
+            lease_expires_at=float(row["lease_expires_at"]) if row["lease_expires_at"] is not None else None,
+            last_error=str(row["last_error"]) if row["last_error"] is not None else None,
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
         )
 
     @staticmethod

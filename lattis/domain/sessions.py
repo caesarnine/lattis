@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict
 
 from pydantic_ai.messages import ModelMessage
 
 if TYPE_CHECKING:
+    from lattis.domain.channels import ChannelBindingRecord
+    from lattis.domain.outbox import NotificationOutboxRecord
     from lattis.domain.schedules import ScheduleRecord, ScheduleRunRecord
 
 
@@ -55,6 +57,87 @@ class SessionStore(Protocol):
     def get_thread_settings(self, session_id: str, thread_id: str) -> ThreadSettings: ...
 
     def set_thread_settings(self, session_id: str, thread_id: str, settings: ThreadSettings) -> None: ...
+
+    # ------------------------------------------------------------------
+    # Channel bindings
+    # ------------------------------------------------------------------
+    def get_channel_binding_record(
+        self,
+        *,
+        channel: str,
+        external_conversation_id: str,
+    ) -> "ChannelBindingRecord | None": ...
+
+    def upsert_channel_binding_record(
+        self,
+        *,
+        binding_id: str,
+        session_id: str,
+        thread_id: str,
+        channel: str,
+        external_conversation_id: str,
+        external_user_id: str | None,
+        metadata_json: dict[str, Any] | None,
+        updated_at: float,
+    ) -> "ChannelBindingRecord": ...
+
+    def list_thread_channel_bindings(
+        self,
+        *,
+        session_id: str,
+        thread_id: str,
+    ) -> list["ChannelBindingRecord"]: ...
+
+    # ------------------------------------------------------------------
+    # Notification outbox
+    # ------------------------------------------------------------------
+    def enqueue_notification_outbox_record(
+        self,
+        *,
+        outbox_id: str,
+        session_id: str,
+        thread_id: str,
+        schedule_id: str | None,
+        schedule_run_id: str | None,
+        channel: str,
+        external_conversation_id: str,
+        payload_json: dict[str, Any],
+        dedupe_key: str,
+        available_at: float,
+        created_at: float,
+    ) -> "NotificationOutboxRecord": ...
+
+    def claim_notification_outbox_records(
+        self,
+        *,
+        now: float,
+        limit: int,
+        lease_seconds: int,
+    ) -> list["NotificationOutboxRecord"]: ...
+
+    def mark_notification_outbox_record_sent(
+        self,
+        *,
+        outbox_id: str,
+        sent_at: float,
+    ) -> "NotificationOutboxRecord | None": ...
+
+    def mark_notification_outbox_record_retry(
+        self,
+        *,
+        outbox_id: str,
+        retry_at: float,
+        failed_at: float,
+        error: str,
+    ) -> "NotificationOutboxRecord | None": ...
+
+    def mark_notification_outbox_record_dead(
+        self,
+        *,
+        outbox_id: str,
+        failed_at: float,
+        error: str,
+    ) -> "NotificationOutboxRecord | None": ...
 
     # ------------------------------------------------------------------
     # Scheduling

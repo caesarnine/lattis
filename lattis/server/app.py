@@ -8,7 +8,7 @@ from lattis.agents.registry import AgentRegistry, load_registry
 from lattis.settings.storage import StorageConfig, load_storage_config
 from lattis.storage.sqlite import SQLiteSessionStore
 from lattis.runtime.context import AppContext
-from lattis.server.routers import agents, meta, models, threads, ui
+from lattis.server.routers import agents, channels, meta, models, threads, ui
 from lattis.web import get_static_dir
 
 
@@ -38,6 +38,7 @@ def create_app(
     )
 
     app.include_router(meta.router)
+    app.include_router(channels.router)
     app.include_router(agents.router)
     app.include_router(models.router)
     app.include_router(threads.router)

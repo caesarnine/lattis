@@ -149,7 +149,6 @@ Common options:
 | `LATTIS_WORKSPACE_DIR` | | Override workspace location |
 | `LATTIS_TELEGRAM_BOT_TOKEN` | | Telegram bot token for `lattis telegram` |
 | `LATTIS_TELEGRAM_SESSION_ID` | server session id | Session id used by Telegram bridge |
-| `LATTIS_TELEGRAM_THREAD_PREFIX` | `tg` | Thread id prefix per Telegram chat |
 
 ## Requirements
 

@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from lattis.agents.registry import load_registry
+from lattis.channels import ChannelAdapterRegistry
 from lattis.domain.schedules import SCHEDULE_STATUS_DONE, SCHEDULE_STATUS_PENDING, create_schedule, list_schedules
 from lattis.runtime.context import AppContext
 from lattis.scheduler import SchedulerConfig, SchedulerWorker
@@ -25,6 +26,20 @@ def _load_latest_schedule_run(db_path: Path) -> tuple[str, int, str | None]:
         ).fetchone()
     assert row is not None
     return str(row[0]), int(row[1]), str(row[2]) if row[2] is not None else None
+
+
+def _load_latest_outbox_status(db_path: Path) -> str:
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT status
+            FROM notification_outbox
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
 
 
 def test_scheduler_worker_keeps_thread_clean_without_notification(tmp_path: Path) -> None:
@@ -131,3 +146,67 @@ def test_scheduler_worker_reschedules_recurring_task(tmp_path: Path) -> None:
     assert status == "done"
     assert notified_count == 1
     assert result_text == "checked inbox"
+
+
+def test_scheduler_worker_dispatches_outbox_notifications(tmp_path: Path) -> None:
+    config = load_storage_config(project_root=tmp_path)
+    store = SQLiteSessionStore(config.db_path)
+    store.save_thread("s1", "t1", messages=[])
+    store.set_session_model("s1", "test")
+    store.upsert_channel_binding_record(
+        binding_id="bind-1",
+        session_id="s1",
+        thread_id="t1",
+        channel="telegram",
+        external_conversation_id="12345",
+        external_user_id=None,
+        metadata_json=None,
+        updated_at=time.time(),
+    )
+
+    registry = load_registry(default_spec="assistant")
+    ctx = AppContext(config=config, store=store, registry=registry)
+
+    create_schedule(
+        store,
+        session_id="s1",
+        thread_id="t1",
+        prompt="Send proactive update.",
+        due_at=time.time() - 5,
+    )
+
+    class _FakeAdapter:
+        def __init__(self) -> None:
+            self.delivered: list[str] = []
+
+        async def send_text(self, *, external_conversation_id: str, text: str) -> None:
+            self.delivered.append(f"telegram:{external_conversation_id}:{text}")
+
+        async def close(self) -> None:
+            return None
+
+    fake_adapter = _FakeAdapter()
+    registry = ChannelAdapterRegistry()
+    registry.register_instance(channel="telegram", adapter=fake_adapter)
+
+    worker = SchedulerWorker(
+        ctx=ctx,
+        config=SchedulerConfig(run_once=True, claim_limit=5),
+        channel_adapters=registry,
+    )
+
+    async def fake_run_schedule(_schedule, *, trigger_prompt: str) -> tuple[str, list[str]]:
+        assert "Task request: Send proactive update." in trigger_prompt
+        return "done", ["Heads up: proactive check complete."]
+
+    worker._run_schedule = fake_run_schedule  # type: ignore[assignment]
+
+    async def run_once() -> None:
+        processed = await worker.run_once()
+        assert processed == 2  # 1 schedule + 1 outbox delivery pass
+        await worker.close()
+
+    asyncio.run(run_once())
+
+    assert fake_adapter.delivered == ["telegram:12345:Heads up: proactive check complete."]
+    assert _load_latest_outbox_status(config.db_path) == "sent"

@@ -38,6 +38,17 @@ Agent discovery
 - List agents: `GET /agents`
 - The thread state response includes both the current agent and the default agent.
 
+Channel bindings (for bridge clients)
+-------------------------------------
+
+Bridge-style clients (Telegram, future Slack/email) resolve or create a mapped
+thread with:
+
+- `POST /channels/{channel}/threads/resolve`
+- Body includes `session_id` and `external_conversation_id`
+
+This endpoint returns the persistent thread id bound to that external conversation.
+
 Minimal fetch sketch
 --------------------
 

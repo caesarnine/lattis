@@ -9,6 +9,8 @@ from pydantic_ai.ui.vercel_ai.request_types import RequestData
 from lattis.client.streaming import iter_ui_events
 from lattis.protocol.schemas import (
     AgentListResponse,
+    ChannelThreadResolveRequest,
+    ChannelThreadResolveResponse,
     ModelListResponse,
     ServerInfoResponse,
     ThreadClearResponse,
@@ -109,6 +111,28 @@ class AgentClient:
         response = await self._client.get("/info")
         self._raise_for_status(response, "Failed to load server info")
         return ServerInfoResponse.model_validate(response.json())
+
+    async def resolve_channel_thread(
+        self,
+        *,
+        channel: str,
+        session_id: str,
+        external_conversation_id: str,
+        external_user_id: str | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> ChannelThreadResolveResponse:
+        payload = ChannelThreadResolveRequest(
+            session_id=session_id,
+            external_conversation_id=external_conversation_id,
+            external_user_id=external_user_id,
+            metadata=metadata,
+        )
+        response = await self._client.post(
+            f"/channels/{channel}/threads/resolve",
+            json=payload.model_dump(mode="json", exclude_none=True),
+        )
+        self._raise_for_status(response, "Failed to resolve channel thread")
+        return ChannelThreadResolveResponse.model_validate(response.json())
 
     async def list_thread_models(self, session_id: str, thread_id: str) -> ModelListResponse:
         response = await self._client.get(f"/sessions/{session_id}/threads/{thread_id}/models")

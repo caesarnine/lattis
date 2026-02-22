@@ -5,28 +5,54 @@ import asyncio
 import pytest
 from pydantic_ai.ui.vercel_ai.request_types import FileUIPart, TextUIPart
 
-from lattis.telegram import (
+from lattis.channels.telegram import (
+    TelegramChannelAdapter,
     build_run_input,
-    chat_id_for_thread_id,
     collect_assistant_text,
     extract_telegram_media_refs,
     normalize_media_type,
     split_telegram_message,
     to_data_url,
-    thread_id_for_chat,
 )
 
 
-def test_thread_id_for_chat_formats_positive_and_negative() -> None:
-    assert thread_id_for_chat(1234) == "tg-1234"
-    assert thread_id_for_chat(-5678) == "tg-m5678"
-    assert thread_id_for_chat(42, prefix="chat") == "chat-42"
+class _FakeResponse:
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, object]:
+        return {"ok": True}
 
 
-def test_chat_id_for_thread_id_round_trip() -> None:
-    assert chat_id_for_thread_id("tg-1234") == 1234
-    assert chat_id_for_thread_id("tg-m5678") == -5678
-    assert chat_id_for_thread_id("other-1234") is None
+class _FakeTelegramClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    async def post(self, path: str, json: dict[str, object]) -> _FakeResponse:
+        self.calls.append((path, json))
+        return _FakeResponse()
+
+
+def test_telegram_channel_adapter_sends_chunks() -> None:
+    client = _FakeTelegramClient()
+    adapter = TelegramChannelAdapter(token="token", client=client)  # type: ignore[arg-type]
+    asyncio.run(adapter.send_text(external_conversation_id="123", text="hello"))
+    assert client.calls == [
+        (
+            "/sendMessage",
+            {
+                "chat_id": 123,
+                "text": "hello",
+            },
+        )
+    ]
+
+
+def test_telegram_channel_adapter_rejects_invalid_chat_id() -> None:
+    client = _FakeTelegramClient()
+    adapter = TelegramChannelAdapter(token="token", client=client)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Invalid Telegram conversation id"):
+        asyncio.run(adapter.send_text(external_conversation_id="abc", text="hello"))
 
 
 def test_split_telegram_message_respects_limit() -> None:

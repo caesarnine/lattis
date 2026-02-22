@@ -2,14 +2,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from uuid import uuid4
 
-import httpx
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.ui.vercel_ai.request_types import SubmitMessage, TextUIPart, UIMessage
 
+from lattis.channels import (
+    ChannelAdapterNotConfiguredError,
+    ChannelAdapterRegistry,
+    build_default_channel_adapter_registry,
+)
+from lattis.domain.channels import list_thread_channel_bindings
 from lattis.domain.messages import merge_messages
+from lattis.domain.outbox import (
+    NotificationOutboxRecord,
+    claim_due_notifications,
+    enqueue_notification,
+    mark_notification_dead,
+    mark_notification_sent,
+    retry_notification,
+)
 from lattis.domain.schedules import (
     SCHEDULE_RUN_STATUS_DONE,
     SCHEDULE_RUN_STATUS_FAILED,
@@ -26,7 +39,6 @@ from lattis.domain.threads import ThreadNotFoundError, load_thread_messages
 from lattis.runtime.chat import create_ephemeral_chat_stream
 from lattis.runtime.context import AppContext
 from lattis.schedule_tools import collect_scheduler_notifications
-from lattis.telegram import DEFAULT_TELEGRAM_THREAD_PREFIX, chat_id_for_thread_id, split_telegram_message
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +51,11 @@ class SchedulerConfig:
     retry_delay_seconds: int = 60
     run_once: bool = False
     telegram_bot_token: str | None = None
-    telegram_thread_prefix: str = DEFAULT_TELEGRAM_THREAD_PREFIX
+
+    outbox_claim_limit: int = 25
+    outbox_lease_seconds: int = 120
+    outbox_retry_delay_seconds: int = 60
+    outbox_max_attempts: int = 5
 
 
 class _StreamTextCollector:
@@ -94,42 +110,57 @@ class _StreamTextCollector:
 class SchedulerWorker:
     ctx: AppContext
     config: SchedulerConfig
-    _telegram_client: httpx.AsyncClient | None = field(default=None, init=False)
+    channel_adapters: ChannelAdapterRegistry | None = None
+
+    def __post_init__(self) -> None:
+        if self.channel_adapters is not None:
+            return
+        self.channel_adapters = build_default_channel_adapter_registry(
+            telegram_bot_token=self.config.telegram_bot_token,
+        )
 
     async def close(self) -> None:
-        if self._telegram_client is not None:
-            await self._telegram_client.aclose()
-            self._telegram_client = None
+        if self.channel_adapters is None:
+            return
+        await self.channel_adapters.close()
 
     async def run(self) -> None:
         logger.info(
-            "scheduler start poll=%ss claim_limit=%s lease=%ss retry=%ss",
+            (
+                "scheduler start poll=%ss claim_limit=%s lease=%ss retry=%ss "
+                "outbox_claim=%s outbox_lease=%ss outbox_retry=%ss"
+            ),
             self.config.poll_interval_seconds,
             self.config.claim_limit,
             self.config.lease_seconds,
             self.config.retry_delay_seconds,
+            self.config.outbox_claim_limit,
+            self.config.outbox_lease_seconds,
+            self.config.outbox_retry_delay_seconds,
         )
         try:
             while True:
-                claimed = await self.run_once()
+                processed = await self.run_once()
                 if self.config.run_once:
                     return
-                if claimed == 0:
+                if processed == 0:
                     await asyncio.sleep(max(0.1, self.config.poll_interval_seconds))
         finally:
             await self.close()
 
     async def run_once(self) -> int:
+        processed = 0
         due = claim_due_schedules(
             self.ctx.store,
             limit=self.config.claim_limit,
             lease_seconds=self.config.lease_seconds,
         )
-        if not due:
-            return 0
         for schedule in due:
             await self._process_schedule(schedule)
-        return len(due)
+            processed += 1
+
+        processed += await self._dispatch_outbox_once()
+        return processed
 
     async def _process_schedule(self, schedule: ScheduleRecord) -> None:
         trigger_prompt = self._build_trigger_prompt(schedule)
@@ -141,10 +172,20 @@ class SchedulerWorker:
         try:
             result_text, notifications = await self._run_schedule(schedule, trigger_prompt=trigger_prompt)
             notified_count = 0
+            clean_notifications: list[str] = []
             for message in notifications:
-                await self._deliver_proactive_message(schedule, message)
-                self._append_assistant_notification(schedule, message)
+                text = message.strip()
+                if not text:
+                    continue
+                clean_notifications.append(text)
+                self._append_assistant_notification(schedule, text)
                 notified_count += 1
+
+            queued_count = self._enqueue_notifications(
+                schedule,
+                run_id=run_record.run_id,
+                notifications=clean_notifications,
+            )
 
             complete_schedule_run(self.ctx.store, schedule=schedule)
             finish_schedule_run(
@@ -156,10 +197,11 @@ class SchedulerWorker:
                 notified_count=notified_count,
             )
             logger.info(
-                "schedule complete id=%s thread=%s notifications=%s next=%s",
+                "schedule complete id=%s thread=%s notifications=%s queued=%s next=%s",
                 schedule.schedule_id,
                 schedule.thread_id,
                 notified_count,
+                queued_count,
                 "interval" if schedule.interval_seconds else "none",
             )
         except ThreadNotFoundError:
@@ -199,6 +241,119 @@ class SchedulerWorker:
                 notified_count=0,
             )
 
+    def _enqueue_notifications(
+        self,
+        schedule: ScheduleRecord,
+        *,
+        run_id: str,
+        notifications: list[str],
+    ) -> int:
+        if not notifications:
+            return 0
+
+        bindings = list_thread_channel_bindings(
+            self.ctx.store,
+            session_id=schedule.session_id,
+            thread_id=schedule.thread_id,
+        )
+        if not bindings:
+            return 0
+
+        queued = 0
+        for index, text in enumerate(notifications):
+            for binding in bindings:
+                dedupe_key = (
+                    f"schedule:{schedule.schedule_id}:run:{run_id}:"
+                    f"message:{index}:channel:{binding.channel}:conversation:{binding.external_conversation_id}"
+                )
+                enqueue_notification(
+                    self.ctx.store,
+                    session_id=schedule.session_id,
+                    thread_id=schedule.thread_id,
+                    schedule_id=schedule.schedule_id,
+                    schedule_run_id=run_id,
+                    channel=binding.channel,
+                    external_conversation_id=binding.external_conversation_id,
+                    text=text,
+                    dedupe_key=dedupe_key,
+                )
+                queued += 1
+        return queued
+
+    async def _dispatch_outbox_once(self) -> int:
+        due = claim_due_notifications(
+            self.ctx.store,
+            limit=self.config.outbox_claim_limit,
+            lease_seconds=self.config.outbox_lease_seconds,
+        )
+        if not due:
+            return 0
+
+        for record in due:
+            await self._deliver_outbox_record(record)
+        return len(due)
+
+    async def _deliver_outbox_record(self, record: NotificationOutboxRecord) -> None:
+        text = record.text.strip()
+        if not text:
+            mark_notification_sent(self.ctx.store, outbox_id=record.outbox_id)
+            return
+
+        try:
+            await self._deliver_channel_message(record, text=text)
+        except Exception as exc:
+            error = str(exc)
+            if record.attempt_count >= self.config.outbox_max_attempts:
+                mark_notification_dead(
+                    self.ctx.store,
+                    outbox_id=record.outbox_id,
+                    error=error,
+                )
+                logger.error(
+                    "outbox dead id=%s channel=%s conversation=%s error=%s",
+                    record.outbox_id,
+                    record.channel,
+                    record.external_conversation_id,
+                    error,
+                )
+            else:
+                retry_notification(
+                    self.ctx.store,
+                    outbox_id=record.outbox_id,
+                    error=error,
+                    retry_delay_seconds=self.config.outbox_retry_delay_seconds,
+                )
+                logger.warning(
+                    "outbox retry id=%s channel=%s conversation=%s attempt=%s error=%s",
+                    record.outbox_id,
+                    record.channel,
+                    record.external_conversation_id,
+                    record.attempt_count,
+                    error,
+                )
+            return
+
+        mark_notification_sent(self.ctx.store, outbox_id=record.outbox_id)
+        logger.info(
+            "outbox sent id=%s channel=%s conversation=%s",
+            record.outbox_id,
+            record.channel,
+            record.external_conversation_id,
+        )
+
+    async def _deliver_channel_message(self, record: NotificationOutboxRecord, *, text: str) -> None:
+        registry = self.channel_adapters
+        if registry is None:
+            raise RuntimeError("Channel adapter registry is not configured.")
+        try:
+            await registry.send_text(
+                channel=record.channel,
+                external_conversation_id=record.external_conversation_id,
+                text=text,
+            )
+        except ChannelAdapterNotConfiguredError as exc:
+            raise RuntimeError(str(exc)) from exc
+
     async def _run_schedule(
         self,
         schedule: ScheduleRecord,
@@ -224,43 +379,6 @@ class SchedulerWorker:
         async for chunk in stream:
             collector.add(chunk)
         return collector.render().strip(), collect_scheduler_notifications(deps)
-
-    async def _deliver_proactive_message(self, schedule: ScheduleRecord, message: str) -> None:
-        chat_id = chat_id_for_thread_id(
-            schedule.thread_id,
-            prefix=self.config.telegram_thread_prefix,
-        )
-        if chat_id is None:
-            return
-        token = (self.config.telegram_bot_token or "").strip()
-        if not token:
-            raise RuntimeError(
-                "Telegram token is required for proactive delivery to Telegram threads."
-            )
-        client = self._telegram_client
-        if client is None:
-            client = httpx.AsyncClient(
-                base_url=f"https://api.telegram.org/bot{token}",
-                timeout=httpx.Timeout(30.0, connect=10.0),
-            )
-            self._telegram_client = client
-
-        text = message.strip()
-        if not text:
-            return
-        for chunk in split_telegram_message(text):
-            response = await client.post(
-                "/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": chunk,
-                },
-            )
-            response.raise_for_status()
-            payload = response.json()
-            if not isinstance(payload, dict) or payload.get("ok") is not True:
-                detail = payload.get("description") if isinstance(payload, dict) else None
-                raise RuntimeError(str(detail or "Telegram sendMessage failed."))
 
     def _append_assistant_notification(self, schedule: ScheduleRecord, message: str) -> None:
         existing = list(

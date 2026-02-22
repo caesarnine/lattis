@@ -93,12 +93,21 @@ Useful flags:
 - `--claim-limit`
 - `--lease-seconds`
 - `--retry-seconds`
+- `--outbox-claim-limit`
+- `--outbox-lease-seconds`
+- `--outbox-retry-seconds`
+- `--outbox-max-attempts`
 
-Proactive Telegram Delivery
----------------------------
+Proactive Delivery
+------------------
 
-If a schedule belongs to a Telegram-mapped thread id (`tg-...` by default), each `notify_user`
-message is sent to Telegram and appended to thread history.
+When a scheduler run calls `notify_user`, messages are written to thread history and
+queued in the notification outbox. The scheduler worker then dispatches queued
+notifications to bound channel conversations through a channel adapter registry
+(telegram today, extensible to additional channels).
 
+For Telegram delivery:
+
+- Bindings are created by `lattis telegram` using channel metadata (`channel=telegram`,
+  `external_conversation_id=<chat-id>`).
 - Bot token comes from `LATTIS_TELEGRAM_BOT_TOKEN` or `--telegram-token`.
-- Thread prefix defaults to `tg` or can be overridden with `--telegram-thread-prefix`.

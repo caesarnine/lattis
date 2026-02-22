@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel
 from pydantic_ai.ui.vercel_ai.request_types import UIMessage
 
@@ -37,6 +39,21 @@ class AgentInfo(BaseModel):
 class AgentListResponse(BaseModel):
     default_agent: str
     agents: list[AgentInfo]
+
+
+class ChannelThreadResolveRequest(BaseModel):
+    session_id: str
+    external_conversation_id: str
+    external_user_id: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class ChannelThreadResolveResponse(BaseModel):
+    session_id: str
+    thread_id: str
+    channel: str
+    external_conversation_id: str
+    created: bool
 
 
 class ThreadAgentResponse(BaseModel):

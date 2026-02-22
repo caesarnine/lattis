@@ -11,11 +11,11 @@ How thread mapping works
 - Session id defaults to the connected server's session id (same session used by
   TUI/Web by default). Override with `--session-id` or
   `LATTIS_TELEGRAM_SESSION_ID`.
-- Thread id is generated as `<thread-prefix>-<chat-id>` where the default
-  prefix is `tg` (override with `--thread-prefix` or
-  `LATTIS_TELEGRAM_THREAD_PREFIX`).
+- Mapping is stored explicitly as a channel binding in SQLite (`channel=telegram`,
+  `external_conversation_id=<chat-id>`), so thread ids are decoupled from Telegram ids.
 
-This gives each chat a cohesive "single texting thread" history.
+This gives each chat a cohesive "single texting thread" history while keeping
+routing extensible for future channels via the channel adapter registry.
 
 Supported inputs include:
 
