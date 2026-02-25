@@ -4,7 +4,8 @@ import time
 import uuid
 from typing import Any
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from lattis.domain.sessions import SessionStore
 from lattis.domain.threads import ThreadNotFoundError
@@ -16,6 +17,9 @@ SCHEDULE_STATUS_CANCELED = "canceled"
 
 ACTIVE_STATUSES = {SCHEDULE_STATUS_PENDING, SCHEDULE_STATUS_RUNNING}
 TERMINAL_STATUSES = {SCHEDULE_STATUS_DONE, SCHEDULE_STATUS_CANCELED}
+
+SCHEDULE_TRIGGER_ONCE = "once"
+SCHEDULE_TRIGGER_CRON = "cron"
 
 SCHEDULE_RUN_STATUS_RUNNING = "running"
 SCHEDULE_RUN_STATUS_DONE = "done"
@@ -39,9 +43,15 @@ class ScheduleRecord:
     schedule_id: str
     session_id: str
     thread_id: str
+    name: str
     prompt: str
-    due_at: float
-    interval_seconds: int | None
+    trigger_type: str
+    run_at: float | None
+    cron: str | None
+    timezone: str | None
+    next_run_at: float
+    enabled: bool
+    protected: bool
     status: str
     lease_expires_at: float | None
     attempt_count: int
@@ -54,7 +64,11 @@ class ScheduleRecord:
 
     @property
     def is_recurring(self) -> bool:
-        return self.interval_seconds is not None
+        return self.trigger_type == SCHEDULE_TRIGGER_CRON
+
+    @property
+    def is_one_shot(self) -> bool:
+        return self.trigger_type == SCHEDULE_TRIGGER_ONCE
 
 
 @dataclass(frozen=True)
@@ -83,34 +97,114 @@ def new_schedule_run_id() -> str:
 
 
 def parse_due_at(value: str) -> float:
+    return parse_run_at(value)
+
+
+def parse_run_at(value: str) -> float:
     text = value.strip()
     if not text:
-        raise ScheduleValidationError("due_at cannot be empty.")
+        raise ScheduleValidationError("run_at cannot be empty.")
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ScheduleValidationError(
-            "due_at must be an ISO-8601 datetime, for example 2026-02-20T09:00:00-05:00."
+            "run_at must be an ISO-8601 datetime, for example 2026-02-20T09:00:00-05:00."
         ) from exc
     if parsed.tzinfo is None:
         raise ScheduleValidationError(
-            "due_at must include a timezone offset (e.g. 'Z' or '-05:00')."
+            "run_at must include a timezone offset (e.g. 'Z' or '-05:00')."
         )
     return parsed.astimezone(timezone.utc).timestamp()
 
 
 def format_due_at(value: float) -> str:
+    return format_timestamp(value)
+
+
+def format_timestamp(value: float) -> str:
     return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def next_due_for_interval(*, current_due_at: float, interval_seconds: int, now: float) -> float:
-    if interval_seconds <= 0:
-        raise ScheduleValidationError("interval_seconds must be greater than zero.")
-    next_due = current_due_at + interval_seconds
-    if next_due > now:
-        return next_due
-    missed = int((now - current_due_at) // interval_seconds) + 1
-    return current_due_at + (interval_seconds * missed)
+def _parse_timezone(value: str | None) -> timezone | ZoneInfo:
+    if value is None:
+        return timezone.utc
+    text = value.strip()
+    if not text or text.upper() in {"UTC", "Z"}:
+        return timezone.utc
+    if text.startswith(("+", "-")) and len(text) in {6, 3}:
+        try:
+            sign = 1 if text[0] == "+" else -1
+            if len(text) == 3:
+                hours = sign * int(text[1:3])
+                minutes = 0
+            else:
+                hours = sign * int(text[1:3])
+                minutes = sign * int(text[4:6])
+            delta = timedelta(hours=hours, minutes=minutes)
+            return timezone(delta)
+        except Exception as exc:
+            raise ScheduleValidationError(f"Invalid timezone offset: {value!r}") from exc
+    try:
+        return ZoneInfo(text)
+    except Exception as exc:
+        raise ScheduleValidationError(
+            f"Unknown timezone: {value!r}. Use an IANA name like 'America/New_York' or an offset like '-05:00'."
+        ) from exc
+
+
+def validate_cron(value: str) -> str:
+    text = " ".join(value.strip().split())
+    if not text:
+        raise ScheduleValidationError("cron cannot be empty.")
+    if text.startswith("@"):
+        raise ScheduleValidationError("cron macros are not supported; use standard 5-field cron.")
+    parts = text.split(" ")
+    if len(parts) != 5:
+        raise ScheduleValidationError(
+            "cron must have exactly 5 fields: 'minute hour day month weekday' (no seconds)."
+        )
+    try:
+        from croniter import croniter  # type: ignore[import-not-found]
+
+        croniter(text, datetime.now(timezone.utc))
+    except ScheduleValidationError:
+        raise
+    except Exception as exc:
+        raise ScheduleValidationError(f"Invalid cron expression: {text!r}.") from exc
+    return text
+
+
+def next_run_for_cron(*, cron: str, timezone_name: str | None, after: float) -> float:
+    from croniter import croniter  # type: ignore[import-not-found]
+
+    tz = _parse_timezone(timezone_name)
+    base = datetime.fromtimestamp(after, tz=timezone.utc).astimezone(tz)
+    iterator = croniter(cron, base)
+    next_local: datetime = iterator.get_next(datetime)
+    if next_local.tzinfo is None:
+        next_local = next_local.replace(tzinfo=tz)
+    return next_local.astimezone(timezone.utc).timestamp()
+
+
+def preview_cron_runs(
+    *,
+    cron: str,
+    timezone_name: str | None,
+    start_after: float,
+    count: int = 3,
+) -> list[float]:
+    from croniter import croniter  # type: ignore[import-not-found]
+
+    tz = _parse_timezone(timezone_name)
+    base = datetime.fromtimestamp(start_after, tz=timezone.utc).astimezone(tz)
+    iterator = croniter(cron, base)
+    runs: list[float] = []
+    for _ in range(max(1, min(count, 10))):
+        next_local: datetime = iterator.get_next(datetime)
+        if next_local.tzinfo is None:
+            next_local = next_local.replace(tzinfo=tz)
+        runs.append(next_local.astimezone(timezone.utc).timestamp())
+    return runs
 
 
 def create_schedule(
@@ -118,17 +212,41 @@ def create_schedule(
     *,
     session_id: str,
     thread_id: str,
+    name: str,
     prompt: str,
-    due_at: float,
-    interval_seconds: int | None = None,
+    trigger_type: str,
+    run_at: float | None = None,
+    cron: str | None = None,
+    timezone: str | None = None,
+    enabled: bool = True,
+    protected: bool = False,
 ) -> ScheduleRecord:
+    cleaned_name = name.strip()
+    if not cleaned_name:
+        raise ScheduleValidationError("name cannot be empty.")
     cleaned_prompt = prompt.strip()
     if not cleaned_prompt:
         raise ScheduleValidationError("prompt cannot be empty.")
-    if due_at <= 0:
-        raise ScheduleValidationError("due_at must be a valid UTC timestamp.")
-    if interval_seconds is not None and interval_seconds <= 0:
-        raise ScheduleValidationError("interval_seconds must be greater than zero.")
+    if trigger_type not in {SCHEDULE_TRIGGER_ONCE, SCHEDULE_TRIGGER_CRON}:
+        raise ScheduleValidationError("trigger_type must be 'once' or 'cron'.")
+    next_run_at: float
+    validated_cron: str | None = None
+    if trigger_type == SCHEDULE_TRIGGER_ONCE:
+        if run_at is None or run_at <= 0:
+            raise ScheduleValidationError("run_at must be a valid UTC timestamp.")
+        next_run_at = run_at
+        cron = None
+        timezone = None
+    else:
+        if cron is None:
+            raise ScheduleValidationError("cron is required for cron schedules.")
+        validated_cron = validate_cron(cron)
+        next_run_at = next_run_for_cron(
+            cron=validated_cron,
+            timezone_name=timezone,
+            after=time.time(),
+        )
+        run_at = None
     if not store.thread_exists(session_id, thread_id):
         raise ThreadNotFoundError(f"Thread '{thread_id}' not found.")
     created_at = time.time()
@@ -136,9 +254,15 @@ def create_schedule(
         schedule_id=new_schedule_id(),
         session_id=session_id,
         thread_id=thread_id,
+        name=cleaned_name,
         prompt=cleaned_prompt,
-        due_at=due_at,
-        interval_seconds=interval_seconds,
+        trigger_type=trigger_type,
+        run_at=run_at,
+        cron=validated_cron,
+        timezone=timezone.strip() if isinstance(timezone, str) and timezone.strip() else None,
+        next_run_at=next_run_at,
+        enabled=enabled,
+        protected=protected,
         created_at=created_at,
     )
 
@@ -179,39 +303,89 @@ def update_schedule(
     session_id: str,
     thread_id: str,
     schedule_id: str,
+    name: str | None = None,
     prompt: str | None = None,
-    due_at: float | None = None,
-    interval_seconds: int | None = None,
-    clear_recurrence: bool = False,
+    trigger_type: str | None = None,
+    run_at: float | None = None,
+    cron: str | None = None,
+    timezone: str | None = None,
+    enabled: bool | None = None,
 ) -> ScheduleRecord:
     current = get_schedule(store, session_id=session_id, thread_id=thread_id, schedule_id=schedule_id)
     if current.status in TERMINAL_STATUSES:
         raise ScheduleValidationError("Cannot edit a completed or canceled schedule.")
 
+    next_name = current.name if name is None else name.strip()
+    if not next_name:
+        raise ScheduleValidationError("name cannot be empty.")
+
     next_prompt = current.prompt if prompt is None else prompt.strip()
     if not next_prompt:
         raise ScheduleValidationError("prompt cannot be empty.")
 
-    next_due_at = current.due_at if due_at is None else due_at
-    if next_due_at <= 0:
-        raise ScheduleValidationError("due_at must be a valid UTC timestamp.")
+    next_enabled = current.enabled if enabled is None else bool(enabled)
 
-    if clear_recurrence:
-        next_interval = None
-    elif interval_seconds is None:
-        next_interval = current.interval_seconds
+    resolved_type = current.trigger_type if trigger_type is None else trigger_type.strip()
+    if resolved_type not in {SCHEDULE_TRIGGER_ONCE, SCHEDULE_TRIGGER_CRON}:
+        raise ScheduleValidationError("trigger_type must be 'once' or 'cron'.")
+
+    next_run_at = current.next_run_at
+    next_run_at_value: float | None = current.run_at
+    next_cron = current.cron
+    next_timezone = current.timezone
+    trigger_changed = False
+
+    if resolved_type == SCHEDULE_TRIGGER_ONCE:
+        if current.trigger_type != SCHEDULE_TRIGGER_ONCE:
+            if run_at is None:
+                raise ScheduleValidationError("run_at is required when switching to a one-shot schedule.")
+            trigger_changed = True
+
+        if run_at is not None:
+            if run_at <= 0:
+                raise ScheduleValidationError("run_at must be a valid UTC timestamp.")
+            next_run_at_value = run_at
+            next_run_at = run_at
+            trigger_changed = True
+
+        next_cron = None
+        next_timezone = None
     else:
-        if interval_seconds <= 0:
-            raise ScheduleValidationError("interval_seconds must be greater than zero.")
-        next_interval = interval_seconds
+        if current.trigger_type != SCHEDULE_TRIGGER_CRON:
+            if cron is None:
+                raise ScheduleValidationError("cron is required when switching to a cron schedule.")
+            trigger_changed = True
+
+        if cron is not None:
+            next_cron = validate_cron(cron)
+            trigger_changed = True
+        if timezone is not None:
+            next_timezone = timezone.strip() or None
+            trigger_changed = True
+
+        if not next_cron:
+            raise ScheduleValidationError("cron is required for cron schedules.")
+
+        next_run_at_value = None
+        if trigger_changed:
+            next_run_at = next_run_for_cron(
+                cron=next_cron,
+                timezone_name=next_timezone,
+                after=time.time(),
+            )
 
     updated = store.update_schedule_record(
         schedule_id=schedule_id,
         session_id=session_id,
         thread_id=thread_id,
+        name=next_name,
         prompt=next_prompt,
-        due_at=next_due_at,
-        interval_seconds=next_interval,
+        trigger_type=resolved_type,
+        run_at=next_run_at_value,
+        cron=next_cron,
+        timezone=next_timezone,
+        next_run_at=next_run_at,
+        enabled=next_enabled,
         updated_at=time.time(),
     )
     if updated is None:
@@ -237,6 +411,19 @@ def cancel_schedule(
     return canceled
 
 
+def delete_schedule(
+    store: SessionStore,
+    *,
+    session_id: str,
+    thread_id: str,
+    schedule_id: str,
+) -> bool:
+    record = get_schedule(store, session_id=session_id, thread_id=thread_id, schedule_id=schedule_id)
+    if record.protected:
+        raise ScheduleValidationError("Cannot delete a protected schedule.")
+    return store.delete_schedule_record(schedule_id=schedule_id, session_id=session_id, thread_id=thread_id)
+
+
 def claim_due_schedules(
     store: SessionStore,
     *,
@@ -260,11 +447,11 @@ def complete_schedule_run(
 ) -> ScheduleRecord | None:
     now = time.time() if completed_at is None else completed_at
     next_due_at: float | None = None
-    if schedule.interval_seconds is not None:
-        next_due_at = next_due_for_interval(
-            current_due_at=schedule.due_at,
-            interval_seconds=schedule.interval_seconds,
-            now=now,
+    if schedule.trigger_type == SCHEDULE_TRIGGER_CRON and schedule.cron is not None:
+        next_due_at = next_run_for_cron(
+            cron=schedule.cron,
+            timezone_name=schedule.timezone,
+            after=now,
         )
     return store.complete_claimed_schedule_record(
         schedule_id=schedule.schedule_id,

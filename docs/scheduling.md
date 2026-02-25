@@ -14,22 +14,43 @@ Agent Tools
 
 Built-in agents expose thread-level schedule management tools:
 
-- `schedule_create(prompt, due_at=None, delay_seconds=None, interval_seconds=None)`
-- `schedule_list(include_terminal=False, limit=20)`
-- `schedule_update(schedule_id, prompt=None, due_at=None, delay_seconds=None, interval_seconds=None, clear_recurrence=False)`
-- `schedule_cancel(schedule_id)`
+- `schedule_upsert(prompt, trigger, name=None, enabled=True)`
+- `schedule_get(name_or_id)`
+- `schedule_list(include_terminal=False, limit=50)`
+- `schedule_set_enabled(name_or_id, enabled)`
+- `schedule_delete(name_or_id)`
 - `current_time()`
 
-`due_at` must be ISO-8601 with timezone offset (for example `2026-02-19T09:00:00-05:00`).
-For relative requests ("in 2 minutes"), use `delay_seconds` or call `current_time()` first.
-For recurring schedules, if `interval_seconds` is set and no `due_at`/`delay_seconds` is provided,
-the first run defaults to one interval from now.
+Schedules are identified by a stable `name` (recommended) and a generated ID (`sched-...`).
+
+### One-shot schedules
+
+Use `trigger.type="once"` with either:
+
+- `run_at`: ISO-8601 datetime with timezone offset (for example `2026-02-19T09:00:00-05:00`), or
+- `delay_seconds`: run N seconds from now
+
+### Cron schedules
+
+Use `trigger.type="cron"` with:
+
+- `cron`: standard 5-field cron (`minute hour day month weekday`) — no seconds
+- `timezone`: optional IANA zone (e.g. `America/New_York`) or fixed offset (e.g. `-05:00`); defaults to `UTC`
 
 During scheduler-triggered execution, agents also get scheduler-only tools:
 
 - `schedule_state_get()` to read per-schedule state and version.
 - `schedule_state_set(state, expected_version=None)` to update state.
 - `notify_user(message)` to queue user-visible proactive messages.
+
+Default Schedules
+-----------------
+
+Each thread gets a default periodic schedule named `heartbeat`:
+
+- runs hourly (`cron="0 * * * *"`, `timezone="UTC"`)
+- can be edited/disabled
+- cannot be deleted (`protected`)
 
 Thread History Semantics
 ------------------------
@@ -43,19 +64,16 @@ Example Prompts
 
 - "Remind me in 2 minutes to stretch."
 - "At 9:00 AM tomorrow, remind me to review payroll."
-- "Every 30 minutes, check new email and only notify me if anything is urgent."
-- "Move schedule `sched-abc123` to 10 minutes from now."
+- "Every Monday at 9am, check new email and only notify me if anything is urgent."
+- "Disable the heartbeat schedule."
 
 Recurrence
 ----------
 
-Recurrence is interval-based:
+Recurrence uses standard 5-field cron.
 
-- one-shot: `interval_seconds=None`
-- recurring: `interval_seconds > 0`
-
-When a recurring schedule runs, the next due time is advanced from the prior due timestamp
-until it lands in the future. This avoids backlog replay after worker downtime.
+When a cron schedule runs, the next run is computed as the next cron occurrence **after the
+actual completion timestamp**, which avoids backlog replay after worker downtime.
 
 State and Run Audit
 -------------------

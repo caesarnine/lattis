@@ -148,13 +148,45 @@ class SessionStore(Protocol):
         schedule_id: str,
         session_id: str,
         thread_id: str,
+        name: str,
         prompt: str,
-        due_at: float,
-        interval_seconds: int | None,
+        trigger_type: str,
+        run_at: float | None,
+        cron: str | None,
+        timezone: str | None,
+        next_run_at: float,
+        enabled: bool,
+        protected: bool,
         created_at: float,
     ) -> "ScheduleRecord": ...
 
     def get_schedule_record(self, schedule_id: str) -> "ScheduleRecord | None": ...
+
+    def get_schedule_record_by_name(
+        self,
+        *,
+        session_id: str,
+        thread_id: str,
+        name: str,
+    ) -> "ScheduleRecord | None": ...
+
+    def upsert_schedule_record(
+        self,
+        *,
+        schedule_id: str,
+        session_id: str,
+        thread_id: str,
+        name: str,
+        prompt: str,
+        trigger_type: str,
+        run_at: float | None,
+        cron: str | None,
+        timezone: str | None,
+        next_run_at: float,
+        enabled: bool,
+        protected: bool,
+        now: float,
+    ) -> "ScheduleRecord": ...
 
     def list_schedule_records(
         self,
@@ -171,9 +203,14 @@ class SessionStore(Protocol):
         schedule_id: str,
         session_id: str,
         thread_id: str,
+        name: str,
         prompt: str,
-        due_at: float,
-        interval_seconds: int | None,
+        trigger_type: str,
+        run_at: float | None,
+        cron: str | None,
+        timezone: str | None,
+        next_run_at: float,
+        enabled: bool,
         updated_at: float,
     ) -> "ScheduleRecord | None": ...
 
@@ -210,6 +247,14 @@ class SessionStore(Protocol):
         retry_at: float,
         error: str,
     ) -> "ScheduleRecord | None": ...
+
+    def delete_schedule_record(
+        self,
+        *,
+        schedule_id: str,
+        session_id: str,
+        thread_id: str,
+    ) -> bool: ...
 
     def set_schedule_state_record(
         self,

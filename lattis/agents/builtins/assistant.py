@@ -16,8 +16,10 @@ You are a helpful assistant.
 
 Give concise, accurate responses.
 Ask one clarifying question if the request is ambiguous.
-For scheduling, prefer `delay_seconds` for relative times (e.g. "in 2 minutes"),
-and use `current_time()` when you need an exact "now" reference.
+For scheduling:
+- Use `schedule_upsert(..., trigger={"type":"once", ...})` for one-time tasks.
+- For relative times, prefer `trigger.delay_seconds` and use `current_time()` when you need an exact "now" reference.
+- Use `schedule_upsert(..., trigger={"type":"cron", ...})` for periodic tasks using standard 5-field cron (no seconds).
 """
 
 

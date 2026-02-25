@@ -5,6 +5,7 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Sequence
+from uuid import uuid4
 
 from pydantic_ai.messages import ModelMessage
 
@@ -23,6 +24,7 @@ from lattis.domain.schedules import (
     SCHEDULE_STATUS_DONE,
     SCHEDULE_STATUS_PENDING,
     SCHEDULE_STATUS_RUNNING,
+    SCHEDULE_TRIGGER_CRON,
     ScheduleRecord,
     ScheduleRunRecord,
 )
@@ -573,9 +575,15 @@ class SQLiteSessionStore(SessionStore):
         schedule_id: str,
         session_id: str,
         thread_id: str,
+        name: str,
         prompt: str,
-        due_at: float,
-        interval_seconds: int | None,
+        trigger_type: str,
+        run_at: float | None,
+        cron: str | None,
+        timezone: str | None,
+        next_run_at: float,
+        enabled: bool,
+        protected: bool,
         created_at: float,
     ) -> ScheduleRecord:
         with self._connect() as conn:
@@ -584,21 +592,29 @@ class SQLiteSessionStore(SessionStore):
             conn.execute(
                 """
                 INSERT INTO schedules (
-                    schedule_id, session_id, thread_id, prompt, due_at,
-                    interval_seconds, status, lease_expires_at,
+                    schedule_id, session_id, thread_id, name, prompt,
+                    trigger_type, run_at, cron, timezone,
+                    next_run_at, enabled, protected,
+                    status, lease_expires_at,
                     attempt_count, last_error, last_run_at,
                     state_json, state_version,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, NULL, NULL, 0, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, NULL, NULL, 0, ?, ?)
                 """,
                 (
                     schedule_id,
                     session_id,
                     thread_id,
+                    name,
                     prompt,
-                    due_at,
-                    interval_seconds,
+                    trigger_type,
+                    run_at,
+                    cron,
+                    timezone,
+                    next_run_at,
+                    1 if enabled else 0,
+                    1 if protected else 0,
                     SCHEDULE_STATUS_PENDING,
                     created_at,
                     created_at,
@@ -611,11 +627,110 @@ class SQLiteSessionStore(SessionStore):
         assert row is not None
         return self._schedule_from_row(row)
 
+    def upsert_schedule_record(
+        self,
+        *,
+        schedule_id: str,
+        session_id: str,
+        thread_id: str,
+        name: str,
+        prompt: str,
+        trigger_type: str,
+        run_at: float | None,
+        cron: str | None,
+        timezone: str | None,
+        next_run_at: float,
+        enabled: bool,
+        protected: bool,
+        now: float,
+    ) -> ScheduleRecord:
+        with self._connect() as conn:
+            self._touch_session(conn, session_id, now=now)
+            self._touch_thread(conn, session_id, thread_id, now=now)
+            conn.execute(
+                """
+                INSERT INTO schedules (
+                    schedule_id, session_id, thread_id, name, prompt,
+                    trigger_type, run_at, cron, timezone,
+                    next_run_at, enabled, protected,
+                    status, lease_expires_at,
+                    attempt_count, last_error, last_run_at,
+                    state_json, state_version,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, NULL, NULL, 0, ?, ?)
+                ON CONFLICT(session_id, thread_id, name) DO UPDATE SET
+                    prompt = excluded.prompt,
+                    trigger_type = excluded.trigger_type,
+                    run_at = excluded.run_at,
+                    cron = excluded.cron,
+                    timezone = excluded.timezone,
+                    next_run_at = excluded.next_run_at,
+                    enabled = excluded.enabled,
+                    protected = CASE WHEN schedules.protected = 1 THEN 1 ELSE excluded.protected END,
+                    status = CASE WHEN schedules.status = ? THEN schedules.status ELSE ? END,
+                    lease_expires_at = CASE
+                        WHEN schedules.status = ? THEN schedules.lease_expires_at
+                        ELSE NULL
+                    END,
+                    last_error = NULL,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    schedule_id,
+                    session_id,
+                    thread_id,
+                    name,
+                    prompt,
+                    trigger_type,
+                    run_at,
+                    cron,
+                    timezone,
+                    next_run_at,
+                    1 if enabled else 0,
+                    1 if protected else 0,
+                    SCHEDULE_STATUS_PENDING,
+                    now,
+                    now,
+                    SCHEDULE_STATUS_RUNNING,
+                    SCHEDULE_STATUS_PENDING,
+                    SCHEDULE_STATUS_RUNNING,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM schedules
+                WHERE session_id = ? AND thread_id = ? AND name = ?
+                LIMIT 1
+                """,
+                (session_id, thread_id, name),
+            ).fetchone()
+        assert row is not None
+        return self._schedule_from_row(row)
+
     def get_schedule_record(self, schedule_id: str) -> ScheduleRecord | None:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM schedules WHERE schedule_id = ?",
                 (schedule_id,),
+            ).fetchone()
+        return self._schedule_from_row(row) if row else None
+
+    def get_schedule_record_by_name(
+        self,
+        *,
+        session_id: str,
+        thread_id: str,
+        name: str,
+    ) -> ScheduleRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM schedules
+                WHERE session_id = ? AND thread_id = ? AND name = ?
+                LIMIT 1
+                """,
+                (session_id, thread_id, name),
             ).fetchone()
         return self._schedule_from_row(row) if row else None
 
@@ -634,7 +749,7 @@ class SQLiteSessionStore(SessionStore):
                     """
                     SELECT * FROM schedules
                     WHERE session_id = ? AND thread_id = ?
-                    ORDER BY due_at ASC, created_at ASC
+                    ORDER BY next_run_at ASC, created_at ASC
                     LIMIT ?
                     """,
                     (session_id, thread_id, bounded_limit),
@@ -644,7 +759,7 @@ class SQLiteSessionStore(SessionStore):
                     """
                     SELECT * FROM schedules
                     WHERE session_id = ? AND thread_id = ? AND status IN (?, ?)
-                    ORDER BY due_at ASC, created_at ASC
+                    ORDER BY next_run_at ASC, created_at ASC
                     LIMIT ?
                     """,
                     (
@@ -663,18 +778,28 @@ class SQLiteSessionStore(SessionStore):
         schedule_id: str,
         session_id: str,
         thread_id: str,
+        name: str,
         prompt: str,
-        due_at: float,
-        interval_seconds: int | None,
+        trigger_type: str,
+        run_at: float | None,
+        cron: str | None,
+        timezone: str | None,
+        next_run_at: float,
+        enabled: bool,
         updated_at: float,
     ) -> ScheduleRecord | None:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE schedules
-                SET prompt = ?,
-                    due_at = ?,
-                    interval_seconds = ?,
+                SET name = ?,
+                    prompt = ?,
+                    trigger_type = ?,
+                    run_at = ?,
+                    cron = ?,
+                    timezone = ?,
+                    next_run_at = ?,
+                    enabled = ?,
                     updated_at = ?
                 WHERE schedule_id = ?
                   AND session_id = ?
@@ -682,9 +807,14 @@ class SQLiteSessionStore(SessionStore):
                   AND status IN (?, ?)
                 """,
                 (
+                    name,
                     prompt,
-                    due_at,
-                    interval_seconds,
+                    trigger_type,
+                    run_at,
+                    cron,
+                    timezone,
+                    next_run_at,
+                    1 if enabled else 0,
                     updated_at,
                     schedule_id,
                     session_id,
@@ -754,10 +884,10 @@ class SQLiteSessionStore(SessionStore):
                 """
                 SELECT * FROM schedules
                 WHERE (
-                    (status = ? AND due_at <= ?)
+                    (status = ? AND enabled = 1 AND next_run_at <= ?)
                     OR (status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
                 )
-                ORDER BY due_at ASC, created_at ASC
+                ORDER BY next_run_at ASC, created_at ASC
                 LIMIT ?
                 """,
                 (
@@ -778,7 +908,7 @@ class SQLiteSessionStore(SessionStore):
                         updated_at = ?
                     WHERE schedule_id = ?
                       AND (
-                        (status = ? AND due_at <= ?)
+                        (status = ? AND enabled = 1 AND next_run_at <= ?)
                         OR (status = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
                       )
                     """,
@@ -822,7 +952,7 @@ class SQLiteSessionStore(SessionStore):
                 """
                 UPDATE schedules
                 SET status = ?,
-                    due_at = ?,
+                    next_run_at = ?,
                     lease_expires_at = NULL,
                     attempt_count = attempt_count + 1,
                     last_error = NULL,
@@ -861,7 +991,7 @@ class SQLiteSessionStore(SessionStore):
                 """
                 UPDATE schedules
                 SET status = ?,
-                    due_at = ?,
+                    next_run_at = ?,
                     lease_expires_at = NULL,
                     attempt_count = attempt_count + 1,
                     last_error = ?,
@@ -885,6 +1015,25 @@ class SQLiteSessionStore(SessionStore):
                 (schedule_id,),
             ).fetchone()
         return self._schedule_from_row(row) if row else None
+
+    def delete_schedule_record(
+        self,
+        *,
+        schedule_id: str,
+        session_id: str,
+        thread_id: str,
+    ) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM schedules
+                WHERE schedule_id = ?
+                  AND session_id = ?
+                  AND thread_id = ?
+                """,
+                (schedule_id, session_id, thread_id),
+            )
+            return cursor.rowcount > 0
 
     def set_schedule_state_record(
         self,
@@ -1143,9 +1292,15 @@ class SQLiteSessionStore(SessionStore):
                     schedule_id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL,
                     thread_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
                     prompt TEXT NOT NULL,
-                    due_at REAL NOT NULL,
-                    interval_seconds INTEGER,
+                    trigger_type TEXT NOT NULL,
+                    run_at REAL,
+                    cron TEXT,
+                    timezone TEXT,
+                    next_run_at REAL NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    protected INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
                     lease_expires_at REAL,
                     attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -1154,14 +1309,15 @@ class SQLiteSessionStore(SessionStore):
                     state_json TEXT,
                     state_version INTEGER NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
+                    updated_at REAL NOT NULL,
+                    UNIQUE(session_id, thread_id, name)
                 )
                 """
             )
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_schedules_due_status
-                ON schedules(status, due_at)
+                ON schedules(status, enabled, next_run_at)
                 """
             )
             conn.execute(
@@ -1224,6 +1380,7 @@ class SQLiteSessionStore(SessionStore):
             """,
             (session_id, thread_id, now, now, dump_messages([])),
         )
+        self._ensure_thread_heartbeat_schedule(conn, session_id=session_id, thread_id=thread_id, now=now)
 
     def _upsert_thread(
         self,
@@ -1244,6 +1401,64 @@ class SQLiteSessionStore(SessionStore):
                 messages = excluded.messages
             """,
             (session_id, thread_id, now, now, messages_blob),
+        )
+        self._ensure_thread_heartbeat_schedule(conn, session_id=session_id, thread_id=thread_id, now=now)
+
+    def _ensure_thread_heartbeat_schedule(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        session_id: str,
+        thread_id: str,
+        now: float,
+    ) -> None:
+        # The heartbeat schedule is created by default for every thread.
+        # It can be edited/disabled, but must never be deleted.
+        next_run_at = (int(now) // 3600 + 1) * 3600
+        schedule_id = f"sched-heartbeat-{uuid4().hex[:12]}"
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO schedules (
+                schedule_id, session_id, thread_id, name, prompt,
+                trigger_type, run_at, cron, timezone,
+                next_run_at, enabled, protected,
+                status, lease_expires_at,
+                attempt_count, last_error, last_run_at,
+                state_json, state_version,
+                created_at, updated_at
+            )
+            VALUES (
+                ?, ?, ?, ?, ?,
+                ?, NULL, ?, ?,
+                ?, 1, 1,
+                ?, NULL,
+                0, NULL, NULL,
+                NULL, 0,
+                ?, ?
+            )
+            """,
+            (
+                schedule_id,
+                session_id,
+                thread_id,
+                "heartbeat",
+                (
+                    "Heartbeat background loop.\n\n"
+                    "Every hour, do lightweight, useful background work for this thread:\n"
+                    "- Scan the thread for open tasks, unanswered questions, or TODOs.\n"
+                    "- Make incremental progress (research, drafts, checks, summaries, code maintenance).\n"
+                    "- Use schedule_state_get / schedule_state_set to remember cursors and avoid repeating work.\n\n"
+                    "Only call notify_user when you have a concrete, user-visible update or an urgent issue.\n"
+                    "If there's nothing worth notifying, do not notify the user."
+                ),
+                SCHEDULE_TRIGGER_CRON,
+                "0 * * * *",
+                "UTC",
+                float(next_run_at),
+                SCHEDULE_STATUS_PENDING,
+                now,
+                now,
+            ),
         )
 
     @staticmethod
@@ -1303,8 +1518,9 @@ class SQLiteSessionStore(SessionStore):
 
     @staticmethod
     def _schedule_from_row(row: sqlite3.Row) -> ScheduleRecord:
+        keys = set(row.keys())
         state_json: dict[str, object] | None = None
-        raw_state = row["state_json"] if "state_json" in row.keys() else None
+        raw_state = row["state_json"] if "state_json" in keys else None
         if isinstance(raw_state, str) and raw_state:
             try:
                 loaded = json.loads(raw_state)
@@ -1313,20 +1529,32 @@ class SQLiteSessionStore(SessionStore):
             except Exception:
                 state_json = None
 
+        next_run_at: float
+        if "next_run_at" in keys and row["next_run_at"] is not None:
+            next_run_at = float(row["next_run_at"])
+        else:
+            next_run_at = float(row["due_at"])  # legacy column
+
         return ScheduleRecord(
             schedule_id=row["schedule_id"],
             session_id=row["session_id"],
             thread_id=row["thread_id"],
+            name=str(row["name"]) if "name" in keys and row["name"] is not None else "",
             prompt=row["prompt"],
-            due_at=float(row["due_at"]),
-            interval_seconds=int(row["interval_seconds"]) if row["interval_seconds"] is not None else None,
+            trigger_type=str(row["trigger_type"]) if "trigger_type" in keys and row["trigger_type"] is not None else "once",
+            run_at=float(row["run_at"]) if "run_at" in keys and row["run_at"] is not None else None,
+            cron=str(row["cron"]) if "cron" in keys and row["cron"] is not None else None,
+            timezone=str(row["timezone"]) if "timezone" in keys and row["timezone"] is not None else None,
+            next_run_at=next_run_at,
+            enabled=bool(int(row["enabled"])) if "enabled" in keys and row["enabled"] is not None else True,
+            protected=bool(int(row["protected"])) if "protected" in keys and row["protected"] is not None else False,
             status=str(row["status"]),
             lease_expires_at=float(row["lease_expires_at"]) if row["lease_expires_at"] is not None else None,
             attempt_count=int(row["attempt_count"]),
             last_error=str(row["last_error"]) if row["last_error"] is not None else None,
             last_run_at=float(row["last_run_at"]) if row["last_run_at"] is not None else None,
             state_json=state_json,
-            state_version=int(row["state_version"]) if "state_version" in row.keys() else 0,
+            state_version=int(row["state_version"]) if "state_version" in keys and row["state_version"] is not None else 0,
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
         )
@@ -1350,9 +1578,75 @@ class SQLiteSessionStore(SessionStore):
         )
 
     def _ensure_schedule_schema(self, conn: sqlite3.Connection) -> None:
-        if not self._column_exists(conn, table="schedules", column="state_json"):
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(schedules)").fetchall() if len(row) >= 2}
+
+        # Clean cutover migration: if the legacy schema is detected, move it aside
+        # and create a fresh schedules table. Existing schedule rows are not migrated.
+        if "name" not in columns:
+            conn.execute("DROP INDEX IF EXISTS idx_schedules_due_status")
+            conn.execute("DROP INDEX IF EXISTS idx_schedules_thread")
+            legacy_name = f"schedules_legacy_{int(time.time())}"
+            conn.execute(f"ALTER TABLE schedules RENAME TO {legacy_name}")
+            conn.execute(
+                """
+                CREATE TABLE schedules (
+                    schedule_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    thread_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    trigger_type TEXT NOT NULL,
+                    run_at REAL,
+                    cron TEXT,
+                    timezone TEXT,
+                    next_run_at REAL NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    protected INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    lease_expires_at REAL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    last_run_at REAL,
+                    state_json TEXT,
+                    state_version INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(session_id, thread_id, name)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX idx_schedules_due_status
+                ON schedules(status, enabled, next_run_at)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX idx_schedules_thread
+                ON schedules(session_id, thread_id, updated_at)
+                """
+            )
+            return
+
+        # Forward-compatible column additions (best-effort).
+        if "trigger_type" not in columns:
+            conn.execute("ALTER TABLE schedules ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'once'")
+        if "run_at" not in columns:
+            conn.execute("ALTER TABLE schedules ADD COLUMN run_at REAL")
+        if "cron" not in columns:
+            conn.execute("ALTER TABLE schedules ADD COLUMN cron TEXT")
+        if "timezone" not in columns:
+            conn.execute("ALTER TABLE schedules ADD COLUMN timezone TEXT")
+        if "next_run_at" not in columns:
+            conn.execute("ALTER TABLE schedules ADD COLUMN next_run_at REAL NOT NULL DEFAULT 0")
+        if "enabled" not in columns:
+            conn.execute("ALTER TABLE schedules ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1")
+        if "protected" not in columns:
+            conn.execute("ALTER TABLE schedules ADD COLUMN protected INTEGER NOT NULL DEFAULT 0")
+        if "state_json" not in columns:
             conn.execute("ALTER TABLE schedules ADD COLUMN state_json TEXT")
-        if not self._column_exists(conn, table="schedules", column="state_version"):
+        if "state_version" not in columns:
             conn.execute("ALTER TABLE schedules ADD COLUMN state_version INTEGER NOT NULL DEFAULT 0")
 
     @staticmethod

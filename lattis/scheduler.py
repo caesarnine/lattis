@@ -33,7 +33,7 @@ from lattis.domain.schedules import (
     create_schedule_run,
     fail_schedule_run,
     finish_schedule_run,
-    format_due_at,
+    format_timestamp,
 )
 from lattis.domain.threads import ThreadNotFoundError, load_thread_messages
 from lattis.runtime.chat import create_ephemeral_chat_stream
@@ -202,7 +202,7 @@ class SchedulerWorker:
                 schedule.thread_id,
                 notified_count,
                 queued_count,
-                "interval" if schedule.interval_seconds else "none",
+                schedule.trigger_type,
             )
         except ThreadNotFoundError:
             logger.warning(
@@ -400,8 +400,9 @@ class SchedulerWorker:
     def _build_trigger_prompt(schedule: ScheduleRecord) -> str:
         return (
             "Scheduled background task trigger.\n"
-            f"Schedule ID: {schedule.schedule_id}\n"
-            f"Due (UTC): {format_due_at(schedule.due_at)}\n"
+            f"Schedule: {schedule.name} ({schedule.schedule_id})\n"
+            f"Next run (UTC): {format_timestamp(schedule.next_run_at)}\n"
+            f"Trigger: {schedule.trigger_type}\n"
             f"Task request: {schedule.prompt}\n\n"
             "Run the task now. Use schedule_state_get and schedule_state_set for checkpointing.\n"
             "Only call notify_user when the user should receive an actual proactive message.\n"

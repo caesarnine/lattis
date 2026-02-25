@@ -7,7 +7,14 @@ from pathlib import Path
 
 from lattis.agents.registry import load_registry
 from lattis.channels import ChannelAdapterRegistry
-from lattis.domain.schedules import SCHEDULE_STATUS_DONE, SCHEDULE_STATUS_PENDING, create_schedule, list_schedules
+from lattis.domain.schedules import (
+    SCHEDULE_STATUS_DONE,
+    SCHEDULE_STATUS_PENDING,
+    SCHEDULE_TRIGGER_CRON,
+    SCHEDULE_TRIGGER_ONCE,
+    create_schedule,
+    list_schedules,
+)
 from lattis.runtime.context import AppContext
 from lattis.scheduler import SchedulerConfig, SchedulerWorker
 from lattis.settings.storage import load_storage_config
@@ -54,8 +61,10 @@ def test_scheduler_worker_keeps_thread_clean_without_notification(tmp_path: Path
         store,
         session_id="s1",
         thread_id="t1",
+        name="stand-up",
         prompt="Remind me to stand up.",
-        due_at=time.time() - 5,
+        trigger_type=SCHEDULE_TRIGGER_ONCE,
+        run_at=time.time() - 5,
     )
 
     worker = SchedulerWorker(ctx=ctx, config=SchedulerConfig(run_once=True, claim_limit=5))
@@ -80,7 +89,8 @@ def test_scheduler_worker_keeps_thread_clean_without_notification(tmp_path: Path
         include_terminal=True,
         limit=20,
     )
-    assert schedules[0].status == SCHEDULE_STATUS_DONE
+    stand_up = next(item for item in schedules if item.name == "stand-up")
+    assert stand_up.status == SCHEDULE_STATUS_DONE
 
     thread_state = store.load_thread("s1", "t1")
     assert thread_state is not None
@@ -100,13 +110,21 @@ def test_scheduler_worker_reschedules_recurring_task(tmp_path: Path) -> None:
     registry = load_registry(default_spec="assistant")
     ctx = AppContext(config=config, store=store, registry=registry)
 
-    create_schedule(
-        store,
+    now = time.time()
+    store.create_schedule_record(
+        schedule_id="sched-recurring",
         session_id="s1",
         thread_id="t1",
+        name="recurring",
         prompt="Recurring reminder.",
-        due_at=time.time() - 120,
-        interval_seconds=60,
+        trigger_type=SCHEDULE_TRIGGER_CRON,
+        run_at=None,
+        cron="*/1 * * * *",
+        timezone="UTC",
+        next_run_at=now - 120,
+        enabled=True,
+        protected=False,
+        created_at=now - 120,
     )
 
     worker = SchedulerWorker(ctx=ctx, config=SchedulerConfig(run_once=True, claim_limit=5))
@@ -131,8 +149,9 @@ def test_scheduler_worker_reschedules_recurring_task(tmp_path: Path) -> None:
         include_terminal=True,
         limit=20,
     )
-    assert schedules[0].status == SCHEDULE_STATUS_PENDING
-    assert schedules[0].due_at > time.time()
+    recurring = next(item for item in schedules if item.name == "recurring")
+    assert recurring.status == SCHEDULE_STATUS_PENDING
+    assert recurring.next_run_at > time.time()
 
     thread_state = store.load_thread("s1", "t1")
     assert thread_state is not None
@@ -171,8 +190,10 @@ def test_scheduler_worker_dispatches_outbox_notifications(tmp_path: Path) -> Non
         store,
         session_id="s1",
         thread_id="t1",
+        name="proactive",
         prompt="Send proactive update.",
-        due_at=time.time() - 5,
+        trigger_type=SCHEDULE_TRIGGER_ONCE,
+        run_at=time.time() - 5,
     )
 
     class _FakeAdapter:
