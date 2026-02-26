@@ -1322,7 +1322,7 @@ requires-dist = [
     { name = "croniter", specifier = ">=2.0.0" },
     { name = "fastapi", specifier = ">=0.110.0" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "pydantic-ai", specifier = ">=1.37.0" },
+    { name = "pydantic-ai", specifier = ">=1.63.0" },
     { name = "pydantic-deep", specifier = ">=0.2.17" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0.0" },
     { name = "ruff", marker = "extra == 'lint'", specifier = ">=0.9.0" },

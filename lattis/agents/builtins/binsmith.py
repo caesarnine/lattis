@@ -352,8 +352,6 @@ def _build_agent(model_name: str) -> Agent[BinsmithDeps, str]:
         deps_type=BinsmithDeps,
         include_execute=True,
         interrupt_on={"execute": False, "write_file": False, "edit_file": False},
-        include_memory=True,
-        memory_dir="/data/memory",
         include_skills=False,
         patch_tool_calls=True,
         cost_tracking=False,
@@ -367,7 +365,7 @@ def _build_agent(model_name: str) -> Agent[BinsmithDeps, str]:
             f"- **Project root (virtual)**: `/project` (host: {ctx.deps.project_root})\n"
             f"- **Workspace (virtual)**: `/` (host: {ctx.deps.workspace})\n"
             "- **Toolkit (virtual)**: `/bin/` (prepended to PATH for `execute`)\n"
-            "- **Scratch (virtual)**: `/tmp/` (set as $TMPDIR for `execute`)\n\n"
+            "- **Scratch (virtual)**: `/tmp/` (set as $TMPDIR for `execute`)\n"
             "In `execute`, you are already in the project root.\n"
             "Use relative paths for repo files, or `/project/...` (rewritten automatically).\n"
             "For workspace files in shell commands, use `$LATTIS_WORKSPACE_ROOT/...`.\n\n"
