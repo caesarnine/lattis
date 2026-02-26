@@ -63,7 +63,7 @@ def _virtualize_path(*, host_path: str, root: Path, prefix: str) -> str:
 
 @dataclass
 class ProjectWorkspaceBackend(SandboxProtocol):
-    """A path-routed backend that mounts a project and a per-thread workspace.
+    """A path-routed backend that mounts a project and a workspace.
 
     Virtual paths:
     - `/project/...` → project root (read/write)

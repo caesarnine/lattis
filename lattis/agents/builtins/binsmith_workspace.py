@@ -9,7 +9,11 @@ _SAFE_THREAD_CHARS = re.compile(r"[^a-zA-Z0-9._-]+")
 
 
 def thread_workspace_path(root: Path, thread_id: str) -> Path:
-    """Return the per-thread workspace path under the shared workspace root."""
+    """Return a per-thread workspace path under a shared workspace root.
+
+    Currently unused by the default Binsmith configuration (which uses a shared
+    workspace), but kept for optional future per-thread isolation.
+    """
     raw = (thread_id or "").strip()
     base = _SAFE_THREAD_CHARS.sub("-", raw).strip("-").lower() or "thread"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8] if raw else "unknown"
@@ -18,7 +22,7 @@ def thread_workspace_path(root: Path, thread_id: str) -> Path:
 
 
 def ensure_workspace(path: Path, *, project_root: Path | None = None) -> Path:
-    """Ensure the Binsmith per-thread workspace directory structure exists."""
+    """Ensure the Binsmith workspace directory structure exists."""
     path.mkdir(parents=True, exist_ok=True)
     (path / "bin").mkdir(exist_ok=True)
     (path / "data").mkdir(exist_ok=True)

@@ -12,7 +12,7 @@ from pydantic_deep import DeepAgentDeps, create_deep_agent
 from lattis.backends import ProjectWorkspaceBackend
 from lattis.agents.builtins.binsmith_linker import link_workspace_bins
 from lattis.agents.builtins.binsmith_tools import discover_tools, format_tools_section
-from lattis.agents.builtins.binsmith_workspace import ensure_workspace, thread_workspace_path
+from lattis.agents.builtins.binsmith_workspace import ensure_workspace
 from lattis.agents.plugin import AgentPlugin, AgentRunContext, list_known_models
 from lattis.domain.schedules import ScheduleRecord, format_timestamp, list_schedules
 from lattis.domain.sessions import SessionStore
@@ -34,7 +34,7 @@ You are Lattis — a resourceful, proactive assistant who builds up capabilities
 The console tools expose a **virtual filesystem**:
 
 - `/project/...` → the repository (project root)
-- `/...` → your per-thread workspace (persistent)
+- `/...` → your workspace (persistent)
 
 `execute` runs in the project root. `/project/...` paths inside shell commands are rewritten to the host project root.
 
@@ -206,7 +206,7 @@ apt-get install -y pandoc # Document conversion
 ## Workspace Structure
 
 ```
-/  # per-thread workspace root
+/  # workspace root
   bin/      # Your toolkit (executable, self-documenting)
   data/     # Persistent data files
   tmp/      # Scratch space
@@ -400,7 +400,7 @@ def create_deps(
     scheduler_trigger: bool = False,
     runtime: SchedulerToolRuntime | None = None,
 ) -> BinsmithDeps:
-    workspace = ensure_workspace(thread_workspace_path(workspace_root, thread_id))
+    workspace = ensure_workspace(workspace_root)
     backend = ProjectWorkspaceBackend(project_root=project_root, workspace_root=workspace)
 
     return BinsmithDeps(
@@ -435,8 +435,7 @@ def _create_deps(ctx: AgentRunContext) -> BinsmithDeps:
 def _on_complete(ctx: AgentRunContext, result: Any) -> None:
     if bool(getattr(ctx.run_input, "scheduler_trigger", False)):
         return
-    workspace = thread_workspace_path(ctx.workspace, ctx.thread_id)
-    link_workspace_bins(workspace)
+    link_workspace_bins(ctx.workspace)
 
 
 plugin = AgentPlugin(

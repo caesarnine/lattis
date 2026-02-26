@@ -6,7 +6,6 @@ from pydantic_ai.ui.vercel_ai.request_types import SubmitMessage, TextUIPart, UI
 
 from lattis.agents.builtins import binsmith
 from lattis.agents.plugin import AgentRunContext
-from lattis.agents.builtins.binsmith_workspace import thread_workspace_path
 
 
 class _FakeStore:
@@ -45,8 +44,7 @@ def test_binsmith_create_deps_is_schedule_compatible(tmp_path: Path) -> None:
     assert deps.runtime is not None
     assert deps.runtime.schedule_id == "sched-1"
 
-    expected_workspace = thread_workspace_path(workspace_root, "t1")
-    assert deps.workspace == expected_workspace
-    assert (expected_workspace / "bin").is_dir()
-    assert (expected_workspace / "data").is_dir()
-    assert (expected_workspace / "tmp").is_dir()
+    assert deps.workspace == workspace_root
+    assert (workspace_root / "bin").is_dir()
+    assert (workspace_root / "data").is_dir()
+    assert (workspace_root / "tmp").is_dir()
