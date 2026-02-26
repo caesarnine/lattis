@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from pydantic_ai.messages import ModelMessage
@@ -15,6 +16,7 @@ from lattis.domain.messages import merge_messages
 from lattis.domain.model_selection import select_session_model
 from lattis.domain.threads import load_thread_messages
 from lattis.runtime.context import AppContext
+from lattis.runtime.workspace import workspace_dir_for_session
 from lattis.settings.storage import load_or_create_session_id
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,7 @@ class ChatRequest:
     session_id: str
     thread_id: str
     run_input: RequestData
+    default_session_id: str
 
 
 @dataclass(frozen=True)
@@ -55,7 +58,12 @@ def resolve_chat_request(ctx: AppContext, run_input: RequestData) -> ChatRequest
     thread_id = resolve_thread_id_from_request(run_input)
     if not thread_id:
         raise ChatRequestError("Missing thread id.")
-    return ChatRequest(session_id=session_id, thread_id=thread_id, run_input=run_input)
+    return ChatRequest(
+        session_id=session_id,
+        thread_id=thread_id,
+        run_input=run_input,
+        default_session_id=default_session_id,
+    )
 
 
 def prepare_chat_run(
@@ -65,6 +73,11 @@ def prepare_chat_run(
     accept: str | None = None,
 ) -> ChatRun:
     request = resolve_chat_request(ctx, run_input)
+    workspace: Path = workspace_dir_for_session(
+        workspace_base=ctx.workspace,
+        session_id=request.session_id,
+        default_session_id=request.default_session_id,
+    )
     selection = select_agent_for_thread(
         ctx.store,
         ctx.registry,
@@ -84,7 +97,7 @@ def prepare_chat_run(
         session_id=request.session_id,
         thread_id=request.thread_id,
         model=model_name,
-        workspace=ctx.workspace,
+        workspace=workspace,
         project_root=ctx.project_root,
         store=ctx.store,
         run_input=run_input,

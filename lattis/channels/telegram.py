@@ -143,6 +143,7 @@ class TelegramBotBridge:
         )
         self._owns_telegram_client = telegram_client is None
         self._chat_locks: dict[int, asyncio.Lock] = {}
+        self._chat_sessions: dict[int, str] = {}
         self._chat_threads: dict[int, str] = {}
         self._offset: int | None = None
 
@@ -152,7 +153,7 @@ class TelegramBotBridge:
 
     async def run_forever(self) -> None:
         logger.info(
-            "starting telegram bridge session=%s",
+            "starting telegram bridge session_prefix=%s",
             self.config.session_id,
         )
         try:
@@ -221,7 +222,7 @@ class TelegramBotBridge:
         message: dict[str, object],
         command: str | None,
     ) -> None:
-        thread_id = await self._resolve_thread_for_chat(chat_id, message=message)
+        session_id, thread_id = await self._resolve_thread_for_chat(chat_id, message=message)
 
         if command in {"/start", "/help"}:
             await self._send_message(
@@ -236,7 +237,7 @@ class TelegramBotBridge:
             return
 
         if command in {"/clear", "/reset"}:
-            await self.agent_client.clear_thread(self.config.session_id, thread_id)
+            await self.agent_client.clear_thread(session_id, thread_id)
             await self._send_message(chat_id, "Cleared this thread.")
             return
 
@@ -245,7 +246,7 @@ class TelegramBotBridge:
             if not parts:
                 return
             await self._send_typing(chat_id)
-            run_input = build_run_input(parts=parts, session_id=self.config.session_id, thread_id=thread_id)
+            run_input = build_run_input(parts=parts, session_id=session_id, thread_id=thread_id)
             response_text = await collect_assistant_text(self.agent_client.run_stream(run_input))
             if not response_text:
                 response_text = "(No assistant text returned.)"
@@ -303,10 +304,11 @@ class TelegramBotBridge:
             url=to_data_url(blob, media_type=media_type),
         )
 
-    async def _resolve_thread_for_chat(self, chat_id: int, *, message: dict[str, object]) -> str:
-        cached = self._chat_threads.get(chat_id)
-        if cached:
-            return cached
+    async def _resolve_thread_for_chat(self, chat_id: int, *, message: dict[str, object]) -> tuple[str, str]:
+        cached_session = self._chat_sessions.get(chat_id)
+        cached_thread = self._chat_threads.get(chat_id)
+        if cached_session and cached_thread:
+            return cached_session, cached_thread
 
         sender = message.get("from")
         sender_id: str | None = None
@@ -331,15 +333,21 @@ class TelegramBotBridge:
             if not metadata:
                 metadata = None
 
+        desired_session_id = self._session_id_for_chat(chat_id)
         resolved = await self.agent_client.resolve_channel_thread(
             channel="telegram",
-            session_id=self.config.session_id,
+            session_id=desired_session_id,
             external_conversation_id=str(chat_id),
             external_user_id=sender_id,
             metadata=metadata,
         )
+        self._chat_sessions[chat_id] = resolved.session_id
         self._chat_threads[chat_id] = resolved.thread_id
-        return resolved.thread_id
+        return resolved.session_id, resolved.thread_id
+
+    @staticmethod
+    def _session_id_for_chat(self, chat_id: int) -> str:
+        return f"{self.config.session_id}-{chat_id}"
 
     async def _send_typing(self, chat_id: int) -> None:
         try:

@@ -79,10 +79,6 @@ def resolve_channel_thread_binding(
     now = time.time()
 
     if existing is not None and store.thread_exists(existing.session_id, existing.thread_id):
-        if existing.session_id != session_id:
-            raise ChannelBindingConflictError(
-                "Channel conversation is already bound to a different session."
-            )
         updated = store.upsert_channel_binding_record(
             binding_id=existing.binding_id,
             session_id=existing.session_id,

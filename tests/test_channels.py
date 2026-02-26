@@ -2,10 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from lattis.domain.channels import (
-    ChannelBindingConflictError,
     list_thread_channel_bindings,
     resolve_channel_thread_binding,
 )
@@ -45,19 +42,22 @@ def test_resolve_channel_thread_binding_is_sticky(tmp_path: Path) -> None:
     assert bindings[0].external_conversation_id == "12345"
 
 
-def test_resolve_channel_thread_binding_conflict_between_sessions(tmp_path: Path) -> None:
+def test_resolve_channel_thread_binding_reuses_existing_session(tmp_path: Path) -> None:
     store = SQLiteSessionStore(tmp_path / "lattis.db")
-    resolve_channel_thread_binding(
+    binding, created = resolve_channel_thread_binding(
         store,
         session_id="s1",
         channel="telegram",
         external_conversation_id="12345",
     )
+    assert created is True
 
-    with pytest.raises(ChannelBindingConflictError):
-        resolve_channel_thread_binding(
-            store,
-            session_id="s2",
-            channel="telegram",
-            external_conversation_id="12345",
-        )
+    reused, created = resolve_channel_thread_binding(
+        store,
+        session_id="s2",
+        channel="telegram",
+        external_conversation_id="12345",
+    )
+    assert created is False
+    assert reused.session_id == "s1"
+    assert reused.thread_id == binding.thread_id
