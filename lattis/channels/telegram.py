@@ -345,7 +345,6 @@ class TelegramBotBridge:
         self._chat_threads[chat_id] = resolved.thread_id
         return resolved.session_id, resolved.thread_id
 
-    @staticmethod
     def _session_id_for_chat(self, chat_id: int) -> str:
         return f"{self.config.session_id}-{chat_id}"
 
