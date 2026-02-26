@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Sequence, get_args
 
-from pydantic_ai import Agent
+from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.models import KnownModelName, infer_model
 from pydantic_ai.ui.vercel_ai.request_types import RequestData
 
@@ -28,7 +28,7 @@ class AgentRunContext:
     run_input: RequestData
 
 
-CreateAgentFn = Callable[[str], Agent[Any, Any]]
+CreateAgentFn = Callable[[str], AbstractAgent[Any, Any]]
 CreateDepsFn = Callable[[AgentRunContext], Any]
 RunCompleteFn = Callable[[AgentRunContext, Any], None]
 
@@ -82,18 +82,28 @@ def _callable_arity(fn: Callable[..., Any]) -> int | None:
 
 
 def _wrap_agent_factory(obj: Any, *, name: str) -> CreateAgentFn:
-    if isinstance(obj, Agent):
+    if isinstance(obj, AbstractAgent):
         return lambda model: obj
     if callable(obj):
         arity = _callable_arity(obj)
         if arity == 0:
             created = obj()
-            if not isinstance(created, Agent):
-                raise TypeError(f"{name} factory returned {type(created)!r}, expected pydantic_ai.Agent")
+            if not isinstance(created, AbstractAgent):
+                raise TypeError(
+                    f"{name} factory returned {type(created)!r}, expected pydantic_ai.agent.AbstractAgent"
+                )
             return lambda model: created
         if arity is not None and arity > 1:
             raise TypeError(f"{name} factory must accept 0 or 1 arguments, got {arity}")
-        return lambda model: obj(model)
+        def factory(model: str) -> AbstractAgent[Any, Any]:
+            created = obj(model)
+            if not isinstance(created, AbstractAgent):
+                raise TypeError(
+                    f"{name} factory returned {type(created)!r}, expected pydantic_ai.agent.AbstractAgent"
+                )
+            return created
+
+        return factory
     raise TypeError(f"Unsupported agent spec type: {type(obj)!r}")
 
 

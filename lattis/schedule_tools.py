@@ -63,11 +63,11 @@ def create_schedule_tool_deps(ctx: AgentRunContext) -> ScheduleToolDeps:
 
 
 def collect_scheduler_notifications(deps: object) -> list[str]:
-    if not isinstance(deps, ScheduleToolDeps):
+    runtime = getattr(deps, "runtime", None)
+    notifications = getattr(runtime, "notifications", None)
+    if not isinstance(notifications, list):
         return []
-    if deps.runtime is None:
-        return []
-    return [item for item in deps.runtime.notifications if item.strip()]
+    return [item for item in notifications if isinstance(item, str) and item.strip()]
 
 
 class OnceTriggerInput(BaseModel):
@@ -94,7 +94,7 @@ class CronTriggerInput(BaseModel):
 ScheduleTriggerInput = Annotated[OnceTriggerInput | CronTriggerInput, Field(discriminator="type")]
 
 
-def register_schedule_tools(agent: Agent[ScheduleToolDeps, Any]) -> None:
+def register_schedule_tools(agent: Agent[Any, Any]) -> None:
     @agent.tool
     def current_time(
         _ctx: RunContext[ScheduleToolDeps],
@@ -357,10 +357,11 @@ _SCHEDULER_DISABLED_MESSAGE = "Schedule management tools are unavailable during 
 _SCHEDULER_ONLY_MESSAGE = "This tool is only available during scheduler-triggered runs."
 
 
-def _scheduler_runtime(deps: ScheduleToolDeps) -> SchedulerToolRuntime | None:
-    if not deps.scheduler_trigger:
+def _scheduler_runtime(deps: object) -> SchedulerToolRuntime | None:
+    if not bool(getattr(deps, "scheduler_trigger", False)):
         return None
-    return deps.runtime
+    runtime = getattr(deps, "runtime", None)
+    return runtime if isinstance(runtime, SchedulerToolRuntime) else None
 
 
 def _normalize_schedule_name(value: str | None) -> str:
