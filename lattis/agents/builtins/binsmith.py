@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import os
+import subprocess
+import time
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
+from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
-from pydantic_deep import DeepAgentDeps, create_deep_agent
 
-from lattis.backends import ProjectWorkspaceBackend
 from lattis.agents.builtins.binsmith_linker import link_workspace_bins
 from lattis.agents.builtins.binsmith_tools import discover_tools, format_tools_section
 from lattis.agents.builtins.binsmith_workspace import ensure_workspace
@@ -17,6 +19,7 @@ from lattis.agents.plugin import AgentPlugin, AgentRunContext, list_known_models
 from lattis.domain.schedules import ScheduleRecord, format_timestamp, list_schedules
 from lattis.domain.sessions import SessionStore
 from lattis.schedule_tools import (
+    ScheduleToolDeps,
     SchedulerToolRuntime,
     create_schedule_tool_deps,
     register_schedule_tools,
@@ -26,17 +29,93 @@ from lattis.settings.env import AGENT_MODEL, first_env, read_bool_env
 BINSMITH_MODEL = "BINSMITH_MODEL"
 BINSMITH_LOGFIRE = "BINSMITH_LOGFIRE"
 
+
+class BashExecutionResult(BaseModel):
+    """Result of a bash command execution."""
+
+    exit_code: int
+    stdout: str = ""
+    stderr: str = ""
+    duration_ms: Optional[int] = None
+    timed_out: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.exit_code == 0 and not self.timed_out
+
+
+class BashExecutor:
+    """Execute bash commands via subprocess."""
+
+    def execute(
+        self,
+        command: str,
+        cwd: Path | None = None,
+        timeout: int = 30,
+        env: dict[str, str] | None = None,
+    ) -> BashExecutionResult:
+        start = time.perf_counter()
+
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                executable="/bin/bash",
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+            duration_ms = int((time.perf_counter() - start) * 1000)
+
+            return BashExecutionResult(
+                exit_code=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                duration_ms=duration_ms,
+            )
+
+        except subprocess.TimeoutExpired as exc:
+            duration_ms = int((time.perf_counter() - start) * 1000)
+            stdout = exc.stdout
+            stderr = exc.stderr
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode()
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode()
+            return BashExecutionResult(
+                exit_code=-1,
+                stdout=stdout or "",
+                stderr=stderr or "",
+                duration_ms=duration_ms,
+                timed_out=True,
+            )
+
+        except Exception as exc:  # pragma: no cover - defensive
+            duration_ms = int((time.perf_counter() - start) * 1000)
+            return BashExecutionResult(
+                exit_code=-1,
+                stdout="",
+                stderr=str(exc),
+                duration_ms=duration_ms,
+            )
+
+
 SYSTEM_PROMPT = """\
 You are Lattis — a resourceful, proactive assistant who builds up capabilities over time to become more useful. You're direct, warm, and a little opinionated. You don't just answer questions — you notice patterns, offer to automate tedious things, and think ahead about what the user might need next.
 
-## Paths
+## Your Environment
 
-The console tools expose a **virtual filesystem**:
+- **Project root (current working directory)**: `{project_root}`
+- **Workspace**: `{workspace}` — files here persist across sessions
+- **Your toolkit**: `{workspace}/bin/` — scripts you create live here and are always in your PATH
+- **Scratch space**: `{workspace}/tmp/` — use this for temporary files (also set as $TMPDIR)
+- **Full shell access**: Run any command, install packages, write files, make network requests
 
-- `/project/...` → the repository (project root)
-- `/...` → your workspace (persistent)
+## Your Toolkit
 
-`execute` runs in the project root. `/project/...` paths inside shell commands are rewritten to the host project root.
+{tools_section}
 
 ## How You Work
 
@@ -164,16 +243,16 @@ if __name__ == "__main__":
 
 set -euo pipefail  # Fail fast on errors
 
-[[ "${1:-}" == "--describe" ]] && { sed -n '2s/^# //p' "$0"; exit 0; }
-[[ "${1:-}" == "--help" ]] && { echo "Usage: $(basename "$0") [args]"; exit 0; }
-[[ "${1:-}" == "--json" ]] && json=1 && shift || json=0
+[[ "${{1:-}}" == "--describe" ]] && {{ sed -n '2s/^# //p' "$0"; exit 0; }}
+[[ "${{1:-}}" == "--help" ]] && {{ echo "Usage: $(basename "$0") [args]"; exit 0; }}
+[[ "${{1:-}}" == "--json" ]] && json=1 && shift || json=0
 
 # Your logic here
 # If json=1: print JSON only to stdout (stable schema)
 # Read from stdin if no args: [[ $# -eq 0 ]] && input=$(cat) || input="$1"
 ```
 
-After creating: `chmod +x "$LATTIS_WORKSPACE_ROOT/bin/your-tool"`
+After creating: `chmod +x {workspace}/bin/your-tool`
 
 ## Python Dependencies
 
@@ -206,25 +285,24 @@ apt-get install -y pandoc # Document conversion
 ## Workspace Structure
 
 ```
-/  # workspace root
+{workspace}/
   bin/      # Your toolkit (executable, self-documenting)
   data/     # Persistent data files
   tmp/      # Scratch space
 ```
 """
 
-@dataclass(kw_only=True)
-class BinsmithDeps(DeepAgentDeps):
-    store: SessionStore
-    session_id: str
-    thread_id: str
-    scheduler_trigger: bool = False
-    runtime: SchedulerToolRuntime | None = None
-    workspace: Path
-    project_root: Path
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
+class BashInput(BaseModel):
+    command: str = Field(description="The bash command to execute.")
+    timeout: int = Field(default=30, description="Timeout in seconds.")
+
+
+@dataclass(frozen=True)
+class BinsmithDeps(ScheduleToolDeps):
+    workspace: Path = field(default_factory=Path)
+    project_root: Path = field(default_factory=Path)
+    executor: BashExecutor = field(default_factory=BashExecutor)
 
 
 def _configure_telemetry() -> None:
@@ -346,31 +424,19 @@ def _format_schedules_for_system_prompt(
 
 
 def _build_agent(model_name: str) -> Agent[BinsmithDeps, str]:
-    agent: Agent[BinsmithDeps, str] = create_deep_agent(
-        model=model_name,
-        instructions=SYSTEM_PROMPT,
+    agent = Agent(
+        model_name,
         deps_type=BinsmithDeps,
-        include_execute=True,
-        interrupt_on={"execute": False, "write_file": False, "edit_file": False},
-        include_skills=False,
-        patch_tool_calls=True,
-        cost_tracking=False,
     )
 
     @agent.instructions
     def dynamic_instructions(ctx: RunContext[BinsmithDeps]) -> str:
-        tools_section = format_tools_section(discover_tools(ctx.deps.workspace))
-        base = (
-            "## Your Environment\n\n"
-            f"- **Project root (virtual)**: `/project` (host: {ctx.deps.project_root})\n"
-            f"- **Workspace (virtual)**: `/` (host: {ctx.deps.workspace})\n"
-            "- **Toolkit (virtual)**: `/bin/` (prepended to PATH for `execute`)\n"
-            "- **Scratch (virtual)**: `/tmp/` (set as $TMPDIR for `execute`)\n"
-            "In `execute`, you are already in the project root.\n"
-            "Use relative paths for repo files, or `/project/...` (rewritten automatically).\n"
-            "For workspace files in shell commands, use `$LATTIS_WORKSPACE_ROOT/...`.\n\n"
-            "## Your Toolkit\n\n"
-            f"{tools_section}"
+        tools = discover_tools(ctx.deps.workspace)
+        tools_section = format_tools_section(tools)
+        base = SYSTEM_PROMPT.format(
+            project_root=ctx.deps.project_root,
+            workspace=ctx.deps.workspace,
+            tools_section=tools_section,
         )
         schedules_section = _format_schedules_for_system_prompt(
             store=ctx.deps.store,
@@ -378,6 +444,33 @@ def _build_agent(model_name: str) -> Agent[BinsmithDeps, str]:
             thread_id=ctx.deps.thread_id,
         )
         return f"{base}\n\n{schedules_section}\n"
+
+    @agent.tool(docstring_format="google", require_parameter_descriptions=True)
+    def bash(ctx: RunContext[BinsmithDeps], input: BashInput) -> BashExecutionResult:
+        """
+        Execute a bash command in the project root.
+
+        Args:
+            ctx: Runtime context.
+            input: The command to run and optional timeout.
+
+        Returns:
+            Command output including stdout, stderr, and exit code.
+        """
+        env = os.environ.copy()
+        bin_path = str(ctx.deps.workspace / "bin")
+        tmp_path = str(ctx.deps.workspace / "tmp")
+        env["PATH"] = f"{bin_path}:{env.get('PATH', '')}"
+        env["TMPDIR"] = tmp_path
+        env["TEMP"] = tmp_path
+        env["TMP"] = tmp_path
+
+        return ctx.deps.executor.execute(
+            input.command,
+            cwd=ctx.deps.project_root,
+            timeout=input.timeout,
+            env=env,
+        )
 
     register_schedule_tools(agent)
     return agent
@@ -395,16 +488,14 @@ def create_deps(
     store: SessionStore,
     session_id: str,
     thread_id: str,
+    workspace: Path,
     project_root: Path,
-    workspace_root: Path,
     scheduler_trigger: bool = False,
     runtime: SchedulerToolRuntime | None = None,
 ) -> BinsmithDeps:
-    workspace = ensure_workspace(workspace_root)
-    backend = ProjectWorkspaceBackend(project_root=project_root, workspace_root=workspace)
+    ensure_workspace(workspace)
 
     return BinsmithDeps(
-        backend=backend,
         store=store,
         session_id=session_id,
         thread_id=thread_id,
@@ -427,8 +518,8 @@ def _create_deps(ctx: AgentRunContext) -> BinsmithDeps:
         thread_id=ctx.thread_id,
         scheduler_trigger=schedule_deps.scheduler_trigger,
         runtime=schedule_deps.runtime,
+        workspace=ctx.workspace,
         project_root=ctx.project_root,
-        workspace_root=ctx.workspace,
     )
 
 
