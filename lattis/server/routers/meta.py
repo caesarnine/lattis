@@ -5,40 +5,32 @@ import os
 
 from fastapi import APIRouter, Depends
 
-from lattis.runtime.bootstrap import bootstrap_session
-from lattis.protocol.schemas import ServerInfoResponse, SessionBootstrapResponse
+from lattis.protocol.schemas import HealthResponse, ServerInfoResponse
 from lattis.runtime.context import AppContext
-from lattis.server.deps import get_ctx
-from lattis.domain.agents import get_default_plugin
+from lattis.server.deps import get_ctx, require_auth
 
 router = APIRouter()
 
 
-@router.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@router.get("/info", response_model=ServerInfoResponse)
-async def info(ctx: AppContext = Depends(get_ctx)) -> ServerInfoResponse:
-    default_plugin = get_default_plugin(ctx.registry)
+def get_lattis_version() -> str:
     try:
-        version = importlib.metadata.version("lattis")
+        return importlib.metadata.version("lattis")
     except importlib.metadata.PackageNotFoundError:  # pragma: no cover
-        version = "unknown"
+        return "unknown"
+
+
+@router.get("/health", response_model=HealthResponse)
+async def health() -> HealthResponse:
+    return HealthResponse(status="ok")
+
+
+@router.get("/info", response_model=ServerInfoResponse, dependencies=[Depends(require_auth)])
+async def info(ctx: AppContext = Depends(get_ctx)) -> ServerInfoResponse:
     return ServerInfoResponse(
-        version=version,
+        version=get_lattis_version(),
         pid=os.getpid(),
-        project_root=str(ctx.project_root),
-        data_dir=str(ctx.config.data_dir),
-        workspace_dir=str(ctx.workspace),
-        agent_name=default_plugin.name,
+        lattis_home=str(ctx.config.home_dir),
+        default_agent=ctx.registry.default_agent,
+        active_runs=ctx.run_manager.active_run_count,
+        auth_enabled=ctx.auth_token is not None,
     )
-
-
-@router.get("/session/bootstrap", response_model=SessionBootstrapResponse)
-async def api_session_bootstrap(
-    thread_id: str | None = None,
-    ctx: AppContext = Depends(get_ctx),
-) -> SessionBootstrapResponse:
-    return bootstrap_session(ctx, thread_id=thread_id)

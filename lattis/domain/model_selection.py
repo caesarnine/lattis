@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 from lattis.agents.plugin import AgentPlugin
-from lattis.domain.sessions import SessionStore
+from lattis.domain.models import DaemonStore, ThreadRecord, WorkspaceRecord
 from lattis.settings.env import AGENT_MODEL, first_env
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,28 @@ def list_models(plugin: AgentPlugin) -> list[str]:
         return []
 
 
-def resolve_default_model(plugin: AgentPlugin, *, models: Sequence[str] | None = None) -> str:
+def resolve_default_model(
+    plugin: AgentPlugin,
+    *,
+    workspace: WorkspaceRecord | None = None,
+    models: Sequence[str] | None = None,
+) -> str:
+    if workspace and isinstance(workspace.settings, dict):
+        ws_model = _normalize_model_name(
+            str(workspace.settings["default_model"])
+            if workspace.settings.get("default_model") is not None
+            else None
+        )
+        if ws_model:
+            valid = True
+            if plugin.validate_model:
+                try:
+                    plugin.validate_model(ws_model)
+                except Exception:
+                    valid = False
+            if valid:
+                return ws_model
+
     configured = (plugin.default_model or "").strip()
     if configured:
         return configured
@@ -63,53 +84,49 @@ def resolve_default_model(plugin: AgentPlugin, *, models: Sequence[str] | None =
     return models[0] if models else ""
 
 
-def build_model_list(plugin: AgentPlugin) -> tuple[str, list[str]]:
+def build_model_list(
+    plugin: AgentPlugin,
+    *,
+    workspace: WorkspaceRecord | None = None,
+) -> tuple[str, list[str]]:
     models = list_models(plugin)
-    default_model = resolve_default_model(plugin, models=models)
+    default_model = resolve_default_model(plugin, workspace=workspace, models=models)
     if default_model and default_model not in models:
         models = [default_model, *models]
     return default_model, models
 
 
-def select_session_model(
-    store: SessionStore,
+def validate_requested_model(plugin: AgentPlugin, requested: str | None) -> str | None:
+    model = _normalize_model_name(requested)
+    if not model:
+        return None
+    if plugin.validate_model:
+        plugin.validate_model(model)
+    return model
+
+
+def select_thread_model(
+    store: DaemonStore,
+    thread: ThreadRecord,
     *,
-    session_id: str,
     plugin: AgentPlugin,
+    workspace: WorkspaceRecord | None = None,
 ) -> ModelSelection:
-    default_model = resolve_default_model(plugin)
-    stored = _normalize_model_name(store.get_session_model(session_id))
+    default_model = resolve_default_model(plugin, workspace=workspace)
+    stored = _normalize_model_name(thread.model)
     if stored:
         if plugin.validate_model:
             try:
                 plugin.validate_model(stored)
             except Exception as exc:
                 logger.warning(
-                    "Stored model '%s' is invalid for agent '%s': %s",
+                    "Stored model '%s' on thread '%s' is invalid for agent '%s': %s",
                     stored,
+                    thread.id,
                     plugin.id,
                     exc,
                 )
-                store.set_session_model(session_id, None)
+                store.update_thread(thread.id, model=None)
                 stored = None
     selected = stored or default_model
     return ModelSelection(model=selected, default_model=default_model)
-
-
-def set_session_model(
-    store: SessionStore,
-    *,
-    session_id: str,
-    plugin: AgentPlugin,
-    requested: str | None,
-) -> ModelSelection:
-    default_model = resolve_default_model(plugin)
-    model = (requested or "").strip() if requested is not None else None
-    if model:
-        if plugin.validate_model:
-            plugin.validate_model(model)
-        store.set_session_model(session_id, model)
-        return ModelSelection(model=model, default_model=default_model)
-
-    store.set_session_model(session_id, None)
-    return ModelSelection(model=default_model, default_model=default_model)

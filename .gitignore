@@ -23,6 +23,8 @@ frontend/.vite/
 frontend/.env.local
 frontend/.env.*.local
 frontend/openapi.json
+sdk/dist/
+sdk/openapi.json
 .env
 .env.*
 npm-debug.log*

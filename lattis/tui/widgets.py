@@ -213,6 +213,15 @@ class ToolCall(Widget):
     def on_click(self) -> None:
         self.expanded = not self.expanded
 
+    def append_output(self, chunk: str) -> None:
+        if not chunk:
+            return
+        self.result_output += chunk
+        if not self._composed:
+            return
+        output_widget = self.query_one(".tool-output", Static)
+        output_widget.update(self.result_output)
+
     def set_result(self, output: str, exit_code: int, timed_out: bool = False) -> None:
         self.result_output = output
         self.exit_code = exit_code

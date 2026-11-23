@@ -3,103 +3,153 @@ import React from "react";
 import { ChatPanel } from "@/features/chat/components/ChatPanel";
 import { useAutoScroll } from "@/features/chat/hooks/useAutoScroll";
 import { useChatItems } from "@/features/chat/hooks/useChatItems";
-import { useChatStream } from "@/features/chat/hooks/useChatStream";
+import { AuthPrompt } from "@/features/threads/components/AuthPrompt";
 import { ThreadPanel } from "@/features/threads/components/ThreadPanel";
-import { useThreadSession } from "@/features/threads/hooks/useThreadSession";
-import { SERVER_URL } from "@/services/lattisApi";
+import { useDaemonWorkspace } from "@/features/threads/hooks/useDaemonWorkspace";
+import {
+  WorkspaceInspector,
+  type InspectorTab
+} from "@/features/workspace/components/WorkspaceInspector";
+import { getAuthToken, SERVER_URL } from "@/services/lattisClient";
 
 export default function App() {
   const [isThreadPanelOpen, setIsThreadPanelOpen] = React.useState(false);
-
-  const { items, addMessage, addSystemMessage, handleStreamEvent, hydrateUiMessages } =
-    useChatItems();
+  const [isInspectorOpen, setIsInspectorOpen] = React.useState(false);
+  const [inspectorTab, setInspectorTab] = React.useState<InspectorTab>("files");
 
   const {
-    sessionId,
+    items,
+    clearItems,
+    addSystemMessage,
+    upsertItem,
+    hydrateItems,
+    handleThreadEvent
+  } = useChatItems();
+
+  const {
+    workspaces,
+    activeWorkspace,
+    activeWorkspaceId,
     threads,
     currentThread,
-    agentState,
-    modelState,
+    currentThreadId,
     agents,
+    defaultAgentId,
     models,
+    activeAgentInfo,
+    pluginState,
+    isLoadingPluginState,
+    gitStatus,
+    isLoadingGitStatus,
     isLoadingThreads,
     isLoadingHistory,
     isLoadingAgents,
     isLoadingModels,
     statusMessage,
-    refreshThreads,
+    connectionState,
+    authError,
+    refreshAll,
+    refreshPluginState,
+    refreshGitStatus,
+    selectWorkspace,
+    registerWorkspace,
     selectThread,
     createThread,
-    loadAgents,
-    loadModels,
+    deleteThread,
+    clearThread,
+    loadAgentsList,
+    loadModelsList,
     selectAgent,
-    selectModel
-  } = useThreadSession({
-    hydrateMessages: hydrateUiMessages,
+    selectModel,
+    sendMessage,
+    stopActiveRun,
+    resolveApproval,
+    submitAuthToken,
+    signOut
+  } = useDaemonWorkspace({
+    hydrateItems,
+    upsertItem,
+    clearItems,
+    onThreadEvent: handleThreadEvent,
     addSystemMessage
-  });
-
-  const { isStreaming, sendMessage, stop } = useChatStream({
-    sessionId,
-    threadId: currentThread,
-    addMessage,
-    onStreamEvent: handleStreamEvent
   });
 
   const { scrollRef, showScrollButton, scrollToBottom, handleScroll } =
     useAutoScroll(items.length);
 
+  if (connectionState === "auth_required") {
+    return (
+      <AuthPrompt
+        serverUrl={SERVER_URL}
+        errorMessage={authError}
+        onSubmit={submitAuthToken}
+      />
+    );
+  }
+
+  const agentName = currentThread?.resolved_agent.agent_name ?? null;
   const agentLabel =
-    agentState.selectedName ?? agentState.selectedId ?? agentState.defaultId ?? "";
-  const modelLabel = modelState.selectedId ?? modelState.defaultId ?? "";
-  const canSend = Boolean(sessionId && currentThread);
+    agentName ?? currentThread?.resolved_agent.agent ?? defaultAgentId ?? "";
+  const modelLabel =
+    currentThread?.resolved_model.model ??
+    currentThread?.resolved_model.default_model ??
+    "";
+  const threadStatus = currentThread?.status ?? "idle";
+  const isStreaming = threadStatus === "running";
+  const canSend = Boolean(currentThreadId) && threadStatus === "idle";
+  const hasPluginState = Boolean(activeAgentInfo?.has_state);
+  const changedFileCount = gitStatus?.files?.length ?? 0;
 
   const handleSelectThread = async (threadId: string) => {
-    if (threadId === currentThread) {
-      setIsThreadPanelOpen(false);
-      return;
-    }
-    stop();
     await selectThread(threadId);
     setIsThreadPanelOpen(false);
   };
 
   const handleCreateThread = async () => {
-    const newThread = await createThread();
-    if (newThread) {
+    const created = await createThread();
+    if (created) {
       setIsThreadPanelOpen(false);
     }
   };
 
   const threadSidebarProps = {
+    workspaces: {
+      list: workspaces,
+      activeId: activeWorkspaceId,
+      onSelect: selectWorkspace,
+      onRegister: registerWorkspace
+    },
     threads: {
       list: threads,
-      current: currentThread,
+      currentId: currentThreadId,
       isLoading: isLoadingThreads,
       onSelect: handleSelectThread,
       onCreate: handleCreateThread,
-      onRefresh: refreshThreads
+      onClear: clearThread,
+      onDelete: deleteThread,
+      onRefresh: refreshAll
     },
     agents: {
-      selectedId: agentState.selectedId,
-      selectedName: agentState.selectedName,
-      defaultId: agentState.defaultId,
+      selectedId: currentThread?.resolved_agent.agent ?? null,
+      selectedName: agentName,
+      defaultId: currentThread?.resolved_agent.default_agent ?? defaultAgentId,
       list: agents,
       isLoading: isLoadingAgents,
-      onLoad: loadAgents,
+      onLoad: loadAgentsList,
       onSelect: selectAgent
     },
     models: {
-      selectedId: modelState.selectedId,
-      defaultId: modelState.defaultId,
+      selectedId: currentThread?.resolved_model.model ?? null,
+      defaultId: currentThread?.resolved_model.default_model ?? null,
       list: models,
       isLoading: isLoadingModels,
-      onLoad: loadModels,
+      onLoad: loadModelsList,
       onSelect: selectModel
     },
-    session: {
-      id: sessionId,
-      serverUrl: SERVER_URL
+    daemon: {
+      serverUrl: SERVER_URL,
+      connectionState,
+      onSignOut: getAuthToken() ? signOut : undefined
     }
   };
 
@@ -110,7 +160,7 @@ export default function App() {
         <div className="absolute -right-32 top-48 h-72 w-72 rounded-full bg-orange-200/50 blur-3xl" />
       </div>
 
-      <div className="relative mx-auto flex h-full w-full max-w-7xl flex-col md:flex-row md:gap-6 md:p-6">
+      <div className="relative mx-auto flex h-full w-full max-w-[1600px] flex-col md:flex-row md:gap-5 md:p-5">
         <ThreadPanel
           isOpen={isThreadPanelOpen}
           onClose={() => setIsThreadPanelOpen(false)}
@@ -118,8 +168,11 @@ export default function App() {
         />
 
         <ChatPanel
-          currentThread={currentThread}
-          agentName={agentState.selectedName}
+          currentThreadId={currentThreadId}
+          threadTitle={currentThread?.title || currentThreadId || ""}
+          workspaceName={activeWorkspace?.name ?? ""}
+          threadStatus={threadStatus}
+          agentName={agentName}
           agentLabel={agentLabel}
           modelLabel={modelLabel}
           statusMessage={statusMessage}
@@ -127,14 +180,38 @@ export default function App() {
           items={items}
           isLoadingHistory={isLoadingHistory}
           canSend={canSend}
+          changedFileCount={changedFileCount}
+          isInspectorOpen={isInspectorOpen}
+          onToggleInspector={() => setIsInspectorOpen((open) => !open)}
           onSend={sendMessage}
-          onStop={stop}
+          onStop={stopActiveRun}
+          onResolveApproval={resolveApproval}
           onOpenThreads={() => setIsThreadPanelOpen(true)}
           scrollRef={scrollRef}
           onScroll={handleScroll}
           showScrollButton={showScrollButton}
           onScrollToBottom={scrollToBottom}
         />
+
+        {isInspectorOpen ? (
+          <div className="hidden md:block">
+            <WorkspaceInspector
+              workspaceId={activeWorkspaceId}
+              workspaceName={activeWorkspace?.name ?? ""}
+              agentName={agentLabel || "Plugin"}
+              hasPluginState={hasPluginState}
+              pluginState={pluginState}
+              isLoadingPluginState={isLoadingPluginState}
+              gitStatus={gitStatus}
+              isLoadingGitStatus={isLoadingGitStatus}
+              activeTab={inspectorTab}
+              onTabChange={setInspectorTab}
+              onRefreshPluginState={refreshPluginState}
+              onRefreshGitStatus={refreshGitStatus}
+              onClose={() => setIsInspectorOpen(false)}
+            />
+          </div>
+        ) : null}
       </div>
     </div>
   );

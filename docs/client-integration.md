@@ -1,57 +1,77 @@
 Client Integration Guide
 ========================
 
-This guide describes the thin-client API flow. The server owns session and thread
-state; clients fetch state and send small updates.
+Lattis uses a **Command / Event Bus** architecture designed for thin web, desktop,
+mobile, and terminal GUIs. The daemon owns all workspaces, threads, runs, and items;
+clients send short REST commands and subscribe to one persistent SSE stream.
 
-Core flow
+Authentication
+--------------
+
+All endpoints except `GET /health` require the daemon's Bearer token (stored in
+`~/.lattis/auth.token`, or configured via `LATTIS_API_TOKEN`):
+
+- Header: `Authorization: Bearer <token>`
+- Query fallback (for browser `EventSource`): `?token=<token>`
+
+Core Flow
 ---------
 
-1. Bootstrap a session and pick the active thread.
-   - `GET /session/bootstrap`
-   - Optional: `?thread_id=<id>` to request a specific thread.
-2. Load the current thread state.
-   - `GET /sessions/{session_id}/threads/{thread_id}/state`
-   - Returns agent selection, model selection, and message history.
-3. Update state when the user changes agent or model.
-   - `PATCH /sessions/{session_id}/threads/{thread_id}/state`
-   - Body supports `{"agent": "<id-or-name>"}` and/or `{"model": "<name>"}`.
-   - Set a field to `null` to reset to the default.
-4. Fetch model options for the active thread.
-   - `GET /sessions/{session_id}/threads/{thread_id}/models`
-   - This is thread-scoped because agents can supply different model lists.
-5. Stream responses for a user message.
-   - `POST /ui/chat` (Vercel AI stream protocol)
-   - Include `session_id` and `thread_id` in the run input payload.
+1. **Discover or register workspaces**
+   - `GET /workspaces` — lists `global` plus all registered project folders.
+   - `POST /workspaces` with `{"root_path": "/path/to/repo", "name": "optional"}` — idempotently registers or returns a workspace.
+2. **Subscribe to the SSE Event Bus**
+   - `GET /events` (optionally `?workspace_id=...&thread_id=...&after_seq=0`, supports `Last-Event-ID`).
+   - Streams typed `LattisEvent` JSON frames:
+     - `workspace.created` / `workspace.updated` / `workspace.deleted`
+     - `thread.created` / `thread.updated` / `thread.deleted` / `thread.cleared`
+     - `run.started` / `run.waiting_approval` / `run.completed` / `run.cancelled` / `run.failed`
+     - `item.created` / `item.delta` (`text`, `reasoning`, `tool_input`, `tool_output`) / `item.completed`
+     - `plugin.state_updated`
+     - `bus.resync_required` (re-fetch REST state if a client fell behind the ring buffer)
+3. **List / create / configure threads**
+   - `GET /workspaces/{wid}/threads`
+   - `POST /workspaces/{wid}/threads` (`{"title"?, "agent_id"?, "model"?}`)
+   - `GET /threads/{tid}` / `PATCH /threads/{tid}` / `DELETE /threads/{tid}` / `POST /threads/{tid}/clear`
+   - `GET /threads/{tid}/models` — available models for the thread's active agent
+   - `GET /threads/{tid}/items?after_seq=0&limit=200` — paginated normalized timeline
+4. **Start, cancel, and approve runs**
+   - `POST /threads/{tid}/runs` with `{"input": "..."}` → `202 Accepted` `{run, user_item}` (`409` if thread already busy)
+   - `POST /runs/{rid}/cancel` — cooperatively cancels the background run
+   - `POST /runs/{rid}/approvals/{aid}` with `{"approved": true|false, "reason"?: "..."}` — resolves a `DeferredToolRequests` pause
+5. **Inspect workspace files, Git diffs & plugin state**
+   - `GET /workspaces/{wid}/files?path=&include_hidden=false`
+   - `GET /workspaces/{wid}/file?path=<rel_path>`
+   - `GET /workspaces/{wid}/git/status`
+   - `GET /workspaces/{wid}/git/diff?path=<optional>&staged=false`
+   - `GET /workspaces/{wid}/plugins/{agent_id}/state`
 
-Thread management
------------------
+Using `@lattis/client` (TypeScript)
+-----------------------------------
 
-- List threads: `GET /sessions/{session_id}/threads`
-- Create thread: `POST /sessions/{session_id}/threads` with `{"thread_id": "<id>"}` (optional)
-- Delete thread: `DELETE /sessions/{session_id}/threads/{thread_id}`
-- Clear thread: `POST /sessions/{session_id}/threads/{thread_id}/clear`
-
-Agent discovery
----------------
-
-- List agents: `GET /agents`
-- The thread state response includes both the current agent and the default agent.
-
-Minimal fetch sketch
---------------------
+See `sdk/README.md` for the zero-dependency TypeScript SDK generated from OpenAPI:
 
 ```ts
-const bootstrap = await fetch("/session/bootstrap").then((res) => res.json());
-const { session_id, thread_id } = bootstrap;
+import { LattisClient } from "@lattis/client";
 
-const state = await fetch(
-  `/sessions/${session_id}/threads/${thread_id}/state`
-).then((res) => res.json());
-
-await fetch(`/sessions/${session_id}/threads/${thread_id}/state`, {
-  method: "PATCH",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ agent: "assistant" })
+const client = new LattisClient({
+  baseUrl: "http://127.0.0.1:7700",
+  token: process.env.LATTIS_API_TOKEN
 });
+
+const ws = await client.registerWorkspace("/path/to/repo");
+const thread = await client.createThread(ws.id);
+
+const controller = new AbortController();
+void client.subscribeEvents({
+  workspaceId: ws.id,
+  signal: controller.signal,
+  onEvent: (event) => {
+    if (event.type === "item.delta") {
+      process.stdout.write(event.data.delta);
+    }
+  }
+});
+
+await client.startRun(thread.id, "Check git status and summarize changes.");
 ```

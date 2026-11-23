@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import os
 
+LATTIS_HOME = "LATTIS_HOME"
 LATTIS_SERVER_URL = "LATTIS_SERVER_URL"
-LATTIS_PROJECT_ROOT = "LATTIS_PROJECT_ROOT"
-LATTIS_DATA_DIR = "LATTIS_DATA_DIR"
-LATTIS_DATA_DIR_NAME = "LATTIS_DATA_DIR_NAME"
-LATTIS_WORKSPACE_DIR = "LATTIS_WORKSPACE_DIR"
-LATTIS_DB_PATH = "LATTIS_DB_PATH"
-LATTIS_SESSION_FILE = "LATTIS_SESSION_FILE"
-LATTIS_SESSION_ID = "LATTIS_SESSION_ID"
+LATTIS_API_TOKEN = "LATTIS_API_TOKEN"
+LATTIS_CORS_ORIGINS = "LATTIS_CORS_ORIGINS"
+LATTIS_NO_AUTH = "LATTIS_NO_AUTH"
 
 AGENT_MODEL = "AGENT_MODEL"
 AGENT_DEFAULT = "AGENT_DEFAULT"
@@ -38,3 +35,10 @@ def read_bool_env(name: str, *, default: bool = False) -> bool:
     if value is None:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def read_csv_env(name: str) -> list[str]:
+    value = read_env(name)
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]

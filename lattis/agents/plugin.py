@@ -5,30 +5,61 @@ import inspect
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Sequence, get_args
+from typing import Any, Awaitable, Callable, Sequence, get_args
 
 from pydantic_ai import Agent
 from pydantic_ai.models import KnownModelName, infer_model
-from pydantic_ai.ui.vercel_ai.request_types import RequestData
 
 from lattis.settings.env import AGENT_PLUGIN, read_env
 
 DEFAULT_PLUGIN_SPEC = "lattis.agents.builtins.assistant:plugin"
 
+EmitToolOutputFn = Callable[[str, str, str], None]
+NotifyStateChangedFn = Callable[[], None]
+
+
+def _noop_emit_tool_output(_tool_call_id: str, _chunk: str, _stream: str = "stdout") -> None:
+    return None
+
+
+def _noop_notify_state_changed() -> None:
+    return None
+
+
+@dataclass(frozen=True)
+class PluginStateContext:
+    """Context passed to AgentPlugin.get_state."""
+
+    workspace_id: str
+    project_root: Path
+    plugin_data_dir: Path
+    workspace_data_dir: Path
+
 
 @dataclass(frozen=True)
 class AgentRunContext:
-    session_id: str
+    """Context passed to AgentPlugin.create_deps and AgentPlugin.on_complete."""
+
+    workspace_id: str
     thread_id: str
+    run_id: str
     model: str
-    workspace: Path
     project_root: Path
-    run_input: RequestData
+    plugin_data_dir: Path
+    workspace_data_dir: Path
+    emit_tool_output: EmitToolOutputFn = _noop_emit_tool_output
+    notify_state_changed: NotifyStateChangedFn = _noop_notify_state_changed
+
+    @property
+    def workspace(self) -> Path:
+        """Alias for plugin_data_dir for convenience."""
+        return self.plugin_data_dir
 
 
 CreateAgentFn = Callable[[str], Agent[Any, Any]]
 CreateDepsFn = Callable[[AgentRunContext], Any]
-RunCompleteFn = Callable[[AgentRunContext, Any], None]
+RunCompleteFn = Callable[[AgentRunContext, Any], None | Awaitable[None]]
+GetStateFn = Callable[[PluginStateContext], dict[str, Any] | None | Awaitable[dict[str, Any] | None]]
 
 
 @dataclass(frozen=True)
@@ -36,8 +67,8 @@ class AgentPlugin:
     """
     Server integration layer for a pydantic-ai Agent.
 
-    This is intentionally small: create an Agent (optionally per-model), optionally
-    create a deps object for each run, and optionally hook completion.
+    Intentionally small: create an Agent (optionally per-model), optionally create
+    per-run deps, optionally hook completion, and optionally expose plugin state.
     """
 
     id: str
@@ -48,12 +79,11 @@ class AgentPlugin:
     list_models: Callable[[], Sequence[str]] | None = None
     validate_model: Callable[[str], None] | None = None
     on_complete: RunCompleteFn | None = None
+    get_state: GetStateFn | None = None
 
 
 def _load_symbol(spec: str) -> Any:
-    """
-    Load `module:attr` and return the resolved attribute.
-    """
+    """Load `module:attr` and return the resolved attribute."""
     if ":" not in spec:
         raise ValueError(f"Invalid spec '{spec}'. Expected 'module:attribute'.")
     module_name, attr = spec.split(":", 1)
@@ -164,7 +194,7 @@ def load_plugin(
     return plugin
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=8)
 def list_known_models(*, default_model: str | None = None) -> tuple[str, ...]:
     literal = getattr(KnownModelName, "__value__", None)
     models: list[str] = []

@@ -8,20 +8,21 @@ import pytest
 from lattis.agents.plugin import AgentPlugin
 from lattis.domain.model_selection import (
     resolve_default_model,
-    select_session_model,
-    set_session_model,
+    select_thread_model,
+    validate_requested_model,
 )
+from lattis.domain.models import ThreadRecord
 
 
 class FakeStore:
-    def __init__(self) -> None:
-        self._session_models: dict[str, str | None] = {}
+    def __init__(self, thread: ThreadRecord) -> None:
+        self.thread = thread
 
-    def get_session_model(self, session_id: str) -> str | None:
-        return self._session_models.get(session_id)
-
-    def set_session_model(self, session_id: str, model: str | None) -> None:
-        self._session_models[session_id] = model
+    def update_thread(self, thread_id: str, **kwargs) -> ThreadRecord:
+        assert thread_id == self.thread.id
+        if "model" in kwargs:
+            self.thread.model = kwargs["model"]
+        return self.thread
 
 
 def _make_plugin(
@@ -40,9 +41,15 @@ def _make_plugin(
     )
 
 
-@pytest.fixture()
-def store():
-    return FakeStore()
+def _thread(model: str | None = None) -> ThreadRecord:
+    return ThreadRecord(
+        id="thr-1",
+        workspace_id="ws-1",
+        title="",
+        agent_id="agent",
+        model=model,
+        status="idle",
+    )
 
 
 def test_resolve_default_model_prefers_plugin_default() -> None:
@@ -63,16 +70,17 @@ def test_resolve_default_model_falls_back_to_list() -> None:
         assert resolve_default_model(plugin) == "first"
 
 
-def test_select_session_model_prefers_store(store) -> None:
+def test_select_thread_model_prefers_thread_value() -> None:
     plugin = _make_plugin(default_model="default-model", list_models=lambda: ["default-model"])
-    store.set_session_model("s1", "custom-model")
-    selection = select_session_model(store, session_id="s1", plugin=plugin)
+    thread = _thread("custom-model")
+    store = FakeStore(thread)
+    selection = select_thread_model(store, thread, plugin=plugin)
     assert selection.model == "custom-model"
     assert selection.default_model == "default-model"
     assert selection.is_default is False
 
 
-def test_select_session_model_invalid_store_resets(store) -> None:
+def test_select_thread_model_invalid_stored_resets() -> None:
     def validate_model(value: str) -> None:
         if value != "valid-model":
             raise ValueError("bad model")
@@ -82,30 +90,21 @@ def test_select_session_model_invalid_store_resets(store) -> None:
         list_models=lambda: ["valid-model"],
         validate_model=validate_model,
     )
-    store.set_session_model("s1", "bad-model")
-    selection = select_session_model(store, session_id="s1", plugin=plugin)
+    thread = _thread("bad-model")
+    store = FakeStore(thread)
+    selection = select_thread_model(store, thread, plugin=plugin)
     assert selection.model == "valid-model"
     assert selection.is_default is True
-    assert store.get_session_model("s1") is None
+    assert store.thread.model is None
 
 
-def test_set_session_model_resets_to_default(store) -> None:
-    plugin = _make_plugin(default_model="default-model", list_models=lambda: ["default-model"])
-    selection = set_session_model(store, session_id="s1", plugin=plugin, requested=None)
-    assert selection.model == "default-model"
-    assert selection.is_default is True
-    assert store.get_session_model("s1") is None
-
-
-def test_set_session_model_calls_validator(store) -> None:
+def test_validate_requested_model_calls_validator() -> None:
     def validate_model(value: str) -> None:
         if value != "ok":
             raise ValueError("bad model")
 
-    plugin = _make_plugin(
-        default_model="default-model",
-        list_models=lambda: ["default-model"],
-        validate_model=validate_model,
-    )
+    plugin = _make_plugin(default_model="ok", validate_model=validate_model)
+    assert validate_requested_model(plugin, "ok") == "ok"
+    assert validate_requested_model(plugin, "  ") is None
     with pytest.raises(ValueError):
-        set_session_model(store, session_id="s1", plugin=plugin, requested="bad")
+        validate_requested_model(plugin, "bad")

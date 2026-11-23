@@ -2,6 +2,7 @@ import type { RefObject, UIEvent } from "react";
 import { ArrowDown, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 
+import { ApprovalCard } from "@/features/chat/components/ApprovalCard";
 import { ChatMessage } from "@/features/chat/components/ChatMessage";
 import { ToolCall } from "@/features/chat/components/ToolCall";
 import { type RenderItem } from "@/features/chat/types";
@@ -11,6 +12,7 @@ type ChatMessageListProps = {
   items: RenderItem[];
   isLoadingHistory: boolean;
   agentName: string | null;
+  onResolveApproval?: (runId: string, approvalId: string, approved: boolean) => Promise<void> | void;
   scrollRef: RefObject<HTMLDivElement>;
   onScroll: (event: UIEvent<HTMLDivElement>) => void;
   showScrollButton: boolean;
@@ -21,6 +23,7 @@ export function ChatMessageList({
   items,
   isLoadingHistory,
   agentName,
+  onResolveApproval,
   scrollRef,
   onScroll,
   showScrollButton,
@@ -42,8 +45,8 @@ export function ChatMessageList({
               {agentName ? `Meet ${agentName}` : "Meet your agent"}
             </h3>
             <p className="max-w-xs text-sm text-ink-500 leading-relaxed">
-              Your personal agent for building toolkits and automating tasks. How
-              can I help you today?
+              Your local-first agent workspace. Start a run in this thread—it stays
+              live across desktop, web, and terminal clients.
             </p>
           </div>
         ) : null}
@@ -87,11 +90,25 @@ export function ChatMessageList({
             );
           }
 
+          if (item.kind === "approval") {
+            return (
+              <div key={item.id} className="flex w-full min-w-0 justify-start">
+                <ApprovalCard
+                  item={item}
+                  onResolve={onResolveApproval}
+                  className="max-w-[98%] md:max-w-[85%]"
+                />
+              </div>
+            );
+          }
+
           return (
             <div key={item.id} className="flex w-full min-w-0 justify-start">
               <ToolCall
                 toolName={item.toolName}
                 argsRaw={item.argsRaw}
+                outputStream={item.outputStream}
+                status={item.status}
                 result={item.result}
                 className="max-w-[98%] md:max-w-[85%]"
               />

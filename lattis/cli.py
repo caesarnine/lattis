@@ -14,68 +14,58 @@ import httpx
 import uvicorn
 
 from lattis.client import AgentClient
+from lattis.server.app import create_app
+from lattis.server.routers.meta import get_lattis_version
 from lattis.settings.env import (
     AGENT_DEFAULT,
     AGENT_PLUGINS,
-    LATTIS_PROJECT_ROOT,
+    LATTIS_API_TOKEN,
+    LATTIS_CORS_ORIGINS,
+    LATTIS_NO_AUTH,
     LATTIS_SERVER_URL,
     read_env,
 )
+from lattis.settings.storage import (
+    DEFAULT_DAEMON_HOST,
+    DEFAULT_DAEMON_PORT,
+    DaemonConfig,
+    DaemonInfo,
+    load_daemon_config,
+    load_or_create_auth_token,
+    read_daemon_info,
+    remove_daemon_info,
+    write_daemon_info,
+)
 from lattis.tui.app import run_tui
-
-DEFAULT_SERVER_URL = read_env(LATTIS_SERVER_URL)
-DEFAULT_AUTO_DISCOVER_PORT = 8000
 
 
 @dataclass
 class ConnectionInfo:
-    """Information about the TUI's connection mode."""
+    """Information about the TUI's daemon connection."""
 
-    mode: str  # "server", "local", or "local-server"
-    server_url: str | None = None
+    mode: str  # "remote" or "daemon"
+    server_url: str
 
     @property
     def status_message(self) -> str:
-        if self.mode == "server" and self.server_url:
+        if self.mode == "remote":
             return f"Connecting to {self.server_url}..."
-        if self.mode == "local-server" and self.server_url:
-            return f"Starting local server at {self.server_url}..."
-        return "Starting in local mode..."
+        return f"Connected to Lattis daemon at {self.server_url}"
 
     @property
     def header_label(self) -> str:
-        if self.mode == "server" and self.server_url:
-            # Extract host:port for display
-            parsed = urlparse(self.server_url)
-            return f":{parsed.port}" if parsed.port else parsed.netloc
-        if self.mode == "local-server" and self.server_url:
-            parsed = urlparse(self.server_url)
-            if parsed.port:
-                return f"local:{parsed.port}"
-            return "local"
-        return "local"
-
-
-@dataclass
-class SpawnedServer:
-    process: subprocess.Popen
-    server_url: str
-
-    def shutdown(self, timeout: float = 3.0) -> None:
-        if self.process.poll() is not None:
-            return
-        self.process.terminate()
-        try:
-            self.process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
+        parsed = urlparse(self.server_url)
+        if self.mode == "remote":
+            return parsed.netloc or self.server_url
+        return f"daemon:{parsed.port}" if parsed.port else "daemon"
 
 
 @dataclass
 class TuiClientContext:
     client: AgentClient
     connection_info: ConnectionInfo
-    local_server: SpawnedServer | None = None
+    project_root: Path | None
+    default_agent: str | None = None
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -93,22 +83,25 @@ def main(argv: list[str] | None = None) -> None:
     if command == "tui":
         _run_tui_command(args)
         return
-    if command == "server":
-        _run_server_command(args)
+    if command in {"daemon", "server"}:
+        _run_daemon_command(args)
         return
 
     parser.print_help()
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="lattis", description="Agent CLI")
+    parser = argparse.ArgumentParser(prog="lattis", description="Lattis agent daemon & CLI")
     subparsers = parser.add_subparsers(dest="command")
 
-    tui_parser = subparsers.add_parser("tui", help="Run the TUI client")
+    tui_parser = subparsers.add_parser("tui", help="Attach the TUI client to the Lattis daemon")
     _add_tui_args(tui_parser)
 
-    server_parser = subparsers.add_parser("server", help="Run the API server")
-    _add_server_args(server_parser)
+    daemon_parser = subparsers.add_parser("daemon", help="Run the always-on Lattis daemon")
+    _add_daemon_args(daemon_parser)
+
+    server_parser = subparsers.add_parser("server", help="Alias for `lattis daemon`")
+    _add_daemon_args(server_parser)
 
     return parser
 
@@ -116,42 +109,58 @@ def _build_parser() -> argparse.ArgumentParser:
 def _add_tui_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--server",
-        default=DEFAULT_SERVER_URL,
-        help="Connect to a specific server URL",
+        default=read_env(LATTIS_SERVER_URL),
+        help="Connect to a remote Lattis daemon URL",
     )
     parser.add_argument(
-        "--local",
+        "--token",
+        default=read_env(LATTIS_API_TOKEN),
+        help="Bearer token for authentication",
+    )
+    parser.add_argument(
+        "--global",
+        dest="use_global",
         action="store_true",
-        help="Force local server mode (skip server auto-discovery)",
+        help="Attach to the built-in global workspace instead of current directory",
     )
     parser.add_argument(
         "--agent",
         default=None,
-        help="Default agent id or name for this session (local mode only)",
+        help="Default agent id or name for newly started daemon / threads",
     )
     parser.add_argument(
         "--agents",
         default=None,
-        help="Comma-separated agent plugin specs to load (local mode only)",
+        help="Comma-separated agent plugin specs to load when auto-starting daemon",
     )
 
 
-def _add_server_args(parser: argparse.ArgumentParser) -> None:
+def _add_daemon_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--host",
-        default="127.0.0.1",
+        default=DEFAULT_DAEMON_HOST,
         help="Host interface to bind (default: %(default)s)",
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=8000,
+        default=DEFAULT_DAEMON_PORT,
         help="Port to bind (default: %(default)s)",
     )
     parser.add_argument(
         "--reload",
         action="store_true",
         help="Enable auto-reload",
+    )
+    parser.add_argument(
+        "--cors",
+        default=None,
+        help="Comma-separated allowed CORS origins (default: none / same-origin)",
+    )
+    parser.add_argument(
+        "--no-auth",
+        action="store_true",
+        help="Disable bearer token authentication (dev only)",
     )
     parser.add_argument(
         "--agent",
@@ -163,30 +172,6 @@ def _add_server_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Comma-separated agent plugin specs to load",
     )
-
-
-def _run_tui_command(args: argparse.Namespace) -> None:
-    project_root = Path.cwd()
-
-    context = _create_tui_client(args, project_root=project_root)
-    print(context.connection_info.status_message)
-    try:
-        run_tui(client=context.client, connection_info=context.connection_info)
-    finally:
-        if context.local_server:
-            context.local_server.shutdown()
-
-
-def _run_server_command(args: argparse.Namespace) -> None:
-    project_root = Path.cwd()
-    agent_specs = _parse_agent_specs(getattr(args, "agents", None))
-    _apply_server_env_defaults(
-        project_root=project_root,
-        default_agent=getattr(args, "agent", None),
-        agent_specs=agent_specs,
-    )
-
-    uvicorn.run("lattis.server.asgi:app", host=args.host, port=args.port, reload=args.reload)
 
 
 def _normalize_server_url(url: str) -> str:
@@ -206,22 +191,21 @@ def _server_healthy(server_url: str) -> bool:
     return response.status_code == 200
 
 
-def _pick_local_port(host: str) -> int:
-    preferred = DEFAULT_AUTO_DISCOVER_PORT
+def _pick_daemon_port(host: str) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         try:
-            probe.bind((host, preferred))
+            probe.bind((host, DEFAULT_DAEMON_PORT))
         except OSError:
             pass
         else:
-            return preferred
+            return DEFAULT_DAEMON_PORT
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind((host, 0))
         return probe.getsockname()[1]
 
 
-def _wait_for_server(server_url: str, process: subprocess.Popen, timeout: float = 5.0) -> bool:
+def _wait_for_server(server_url: str, process: subprocess.Popen, timeout: float = 8.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -232,208 +216,145 @@ def _wait_for_server(server_url: str, process: subprocess.Popen, timeout: float 
     return False
 
 
-def _spawn_local_server(
+def _ensure_local_daemon(
+    config: DaemonConfig,
     *,
-    project_root: Path,
-    agent_specs: list[str] | None,
     default_agent: str | None,
-) -> SpawnedServer:
-    host = "127.0.0.1"
-    port = _pick_local_port(host)
-    server_url = f"http://{host}:{port}"
+    agent_specs: str | None,
+) -> tuple[str, str | None]:
+    # 1. Reuse existing daemon from daemon.json if healthy
+    existing = read_daemon_info(config.daemon_info_path)
+    if existing and _server_healthy(existing.api_url):
+        token = load_or_create_auth_token(config)
+        return existing.api_url, token
 
-    env = _build_server_env(
-        project_root=project_root,
-        default_agent=default_agent,
-        agent_specs=agent_specs,
-    )
+    # 2. Probe default daemon port in case daemon.json wasn't written yet
+    default_url = f"http://{DEFAULT_DAEMON_HOST}:{DEFAULT_DAEMON_PORT}"
+    if _server_healthy(default_url):
+        token = load_or_create_auth_token(config)
+        return default_url, token
+
+    # 3. Spawn a detached background daemon process
+    port = _pick_daemon_port(DEFAULT_DAEMON_HOST)
+    api_url = f"http://{DEFAULT_DAEMON_HOST}:{port}"
+    token = load_or_create_auth_token(config)
+
+    env = os.environ.copy()
+    if default_agent:
+        env[AGENT_DEFAULT] = default_agent
+    if agent_specs:
+        env[AGENT_PLUGINS] = agent_specs
 
     cmd = [
         sys.executable,
         "-m",
-        "uvicorn",
-        "lattis.server.asgi:app",
+        "lattis",
+        "daemon",
         "--host",
-        host,
+        DEFAULT_DAEMON_HOST,
         "--port",
         str(port),
-        "--log-level",
-        "warning",
     ]
     process = subprocess.Popen(
         cmd,
-        cwd=str(project_root),
         env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
-
-    if not _wait_for_server(server_url, process):
+    if not _wait_for_server(api_url, process):
         exit_code = process.poll()
-        if exit_code is None:
-            process.terminate()
-            try:
-                process.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-            raise SystemExit("Local server failed to start (timeout). Try `lattis server` for logs.")
         raise SystemExit(
-            f"Local server failed to start (exit code {exit_code}). Try `lattis server` for logs."
+            f"Failed to start Lattis daemon (exit={exit_code}). Try `lattis daemon` for logs."
         )
+    return api_url, token
 
-    return SpawnedServer(process=process, server_url=server_url)
 
+def _run_daemon_command(args: argparse.Namespace) -> None:
+    if args.agent:
+        os.environ[AGENT_DEFAULT] = args.agent
+    if args.agents:
+        os.environ[AGENT_PLUGINS] = args.agents
+    if args.cors is not None:
+        os.environ[LATTIS_CORS_ORIGINS] = args.cors
+    if args.no_auth:
+        os.environ[LATTIS_NO_AUTH] = "1"
 
-def _is_same_project(server_url: str, project_root: Path) -> bool:
-    """Check if the server is running for the same project."""
+    config = load_daemon_config(auth_disabled=bool(args.no_auth) or None)
+    token = load_or_create_auth_token(config)
+    api_url = f"http://{args.host}:{args.port}"
+    info = DaemonInfo(
+        pid=os.getpid(),
+        host=args.host,
+        port=args.port,
+        api_url=api_url,
+        version=get_lattis_version(),
+        started_at=time.time(),
+    )
+    write_daemon_info(config.daemon_info_path, info)
+    print(f"Lattis daemon listening on {api_url} (home: {config.home_dir})")
+    if token is None:
+        print("Auth: disabled")
+    else:
+        print(f"Auth: enabled (token stored in {config.token_path})")
+
     try:
-        info = httpx.get(f"{server_url}/info", timeout=2.0).json()
-    except Exception:
-        return False
-
-    server_root = info.get("project_root")
-    if not isinstance(server_root, str) or not server_root:
-        return False
-
-    try:
-        expected = project_root.resolve()
-        actual = Path(server_root).resolve()
-    except OSError:
-        return False
-
-    return actual == expected
-
-
-def _create_tui_client(args: argparse.Namespace, *, project_root: Path) -> TuiClientContext:
-    agent_spec = getattr(args, "agent", None)
-    agent_specs = _parse_agent_specs(getattr(args, "agents", None))
-
-    # --local flag: skip all discovery, spawn local server
-    if getattr(args, "local", False):
-        return _start_local_server(
-            project_root=project_root,
-            agent_specs=agent_specs,
-            default_agent=agent_spec,
-        )
-
-    # --server URL: explicit connection (no project validation)
-    server = getattr(args, "server", None)
-    if server:
-        server_url = _normalize_server_url(server)
-        _ensure_server_healthy(server_url)
-        return _build_server_context(server_url)
-
-    # Auto-discovery: check default port, validate project
-    auto_url = f"http://127.0.0.1:{DEFAULT_AUTO_DISCOVER_PORT}"
-    if _server_healthy(auto_url):
-        if _is_same_project(auto_url, project_root):
-            return _build_server_context(auto_url)
-        # Different project - silently fall back to local
-
-    # Fallback: spawn local server
-    return _start_local_server(
-        project_root=project_root,
-        agent_specs=agent_specs,
-        default_agent=agent_spec,
-    )
-
-
-def _parse_agent_specs(value: str | None) -> list[str] | None:
-    if not isinstance(value, str):
-        return None
-    items = [item.strip() for item in value.split(",")]
-    filtered = [item for item in items if item]
-    return filtered or None
-
-
-def _apply_server_env_defaults(
-    *,
-    project_root: Path,
-    default_agent: str | None,
-    agent_specs: list[str] | None,
-) -> None:
-    _populate_server_env(
-        os.environ,
-        project_root=project_root,
-        default_agent=default_agent,
-        agent_specs=agent_specs,
-        use_defaults=True,
-    )
-
-
-def _build_server_env(
-    *,
-    project_root: Path,
-    default_agent: str | None,
-    agent_specs: list[str] | None,
-) -> dict[str, str]:
-    env = os.environ.copy()
-    _populate_server_env(
-        env,
-        project_root=project_root,
-        default_agent=default_agent,
-        agent_specs=agent_specs,
-        use_defaults=False,
-    )
-    return env
-
-
-def _populate_server_env(
-    env: dict[str, str],
-    *,
-    project_root: Path,
-    default_agent: str | None,
-    agent_specs: list[str] | None,
-    use_defaults: bool,
-) -> None:
-    def set_value(key: str, value: str) -> None:
-        if use_defaults:
-            env.setdefault(key, value)
+        if args.reload:
+            uvicorn.run("lattis.server.asgi:app", host=args.host, port=args.port, reload=True)
         else:
-            env[key] = value
+            app = create_app(config=config, auth_token=token)
+            uv_config = uvicorn.Config(
+                app,
+                host=args.host,
+                port=args.port,
+                timeout_graceful_shutdown=3,
+            )
 
-    set_value(LATTIS_PROJECT_ROOT, str(project_root))
-    if default_agent is not None:
-        set_value(AGENT_DEFAULT, str(default_agent))
-    if agent_specs is not None:
-        set_value(AGENT_PLUGINS, ",".join(agent_specs))
+            class _DaemonServer(uvicorn.Server):
+                def handle_exit(self, sig, frame) -> None:
+                    try:
+                        app.state.ctx.bus.close()
+                    except Exception:
+                        pass
+                    super().handle_exit(sig, frame)
+
+                async def shutdown(self, sockets=None) -> None:
+                    try:
+                        await super().shutdown(sockets=sockets)
+                    finally:
+                        remove_daemon_info(config.daemon_info_path, pid=os.getpid())
+
+            _DaemonServer(uv_config).run()
+    finally:
+        remove_daemon_info(config.daemon_info_path, pid=os.getpid())
 
 
-def _build_server_context(server_url: str) -> TuiClientContext:
-    return TuiClientContext(
-        client=AgentClient(server_url),
-        connection_info=ConnectionInfo(mode="server", server_url=server_url),
-    )
+def _run_tui_command(args: argparse.Namespace) -> None:
+    config = load_daemon_config()
+    if args.server:
+        server_url = _normalize_server_url(args.server)
+        if not _server_healthy(server_url):
+            print(f"Lattis daemon not reachable at {server_url}.", file=sys.stderr)
+            raise SystemExit(1)
+        token = args.token or load_or_create_auth_token(config)
+        conn_info = ConnectionInfo(mode="remote", server_url=server_url)
+    else:
+        server_url, token = _ensure_local_daemon(
+            config,
+            default_agent=args.agent,
+            agent_specs=args.agents,
+        )
+        if args.token:
+            token = args.token
+        conn_info = ConnectionInfo(mode="daemon", server_url=server_url)
 
-
-def _build_local_server_context(local_server: SpawnedServer) -> TuiClientContext:
-    return TuiClientContext(
-        client=AgentClient(local_server.server_url),
-        connection_info=ConnectionInfo(mode="local-server", server_url=local_server.server_url),
-        local_server=local_server,
-    )
-
-
-def _start_local_server(
-    *,
-    project_root: Path,
-    agent_specs: list[str] | None,
-    default_agent: str | None,
-) -> TuiClientContext:
-    local_server = _spawn_local_server(
+    project_root = None if args.use_global else Path.cwd()
+    client = AgentClient(server_url, token=token)
+    print(conn_info.status_message)
+    run_tui(
+        client=client,
+        connection_info=conn_info,
         project_root=project_root,
-        agent_specs=agent_specs,
-        default_agent=default_agent,
+        default_agent=args.agent or read_env(AGENT_DEFAULT),
     )
-    return _build_local_server_context(local_server)
-
-
-def _ensure_server_healthy(server_url: str) -> None:
-    if _server_healthy(server_url):
-        return
-    print(
-        f"Server not reachable at {server_url}. Start it with `lattis server`.",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)

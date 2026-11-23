@@ -1,16 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 if TYPE_CHECKING:
     from lattis.cli import ConnectionInfo
 
-from pydantic_ai.ui.vercel_ai.request_types import (
-    SubmitMessage,
-    TextUIPart,
-    UIMessage,
-)
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -18,14 +14,25 @@ from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Input, Static
 
 from lattis.client import AgentClient
-from lattis.domain.sessions import generate_thread_id
+from lattis.domain.models import GLOBAL_WORKSPACE_ID, generate_thread_id
+from lattis.protocol.schemas import (
+    BusResyncRequiredEvent,
+    RunCancelledEvent,
+    RunCompletedEvent,
+    RunFailedEvent,
+    RunStartedEvent,
+    RunWaitingApprovalEvent,
+    ThreadClearedEvent,
+    ThreadResponse,
+    ThreadUpdatedEvent,
+)
 from lattis.tui.commands import CommandSuggester, ParsedCommand, build_help_text, parse_command
 from lattis.tui.rendering import ChatRenderer
 from lattis.tui.state import AgentSelectionState, ModelSelectionState
 
 
 class AgentApp(App):
-    """Terminal client for an agent server."""
+    """Terminal client for the Lattis v2 daemon."""
 
     CSS = """
     Screen {
@@ -100,24 +107,30 @@ class AgentApp(App):
         *,
         client: AgentClient,
         connection_info: ConnectionInfo | None = None,
+        project_root: Path | None = None,
+        default_agent: str | None = None,
     ):
         super().__init__()
-        self.session_id = "..."
-        self.thread_id = "..."  # Placeholder until mounted
+        self.workspace_id = GLOBAL_WORKSPACE_ID
+        self.workspace_name = "Global"
+        self.thread_id = "..."
+        self.active_run_id: str | None = None
         self.agent_state = AgentSelectionState()
         self.model_state = ModelSelectionState()
         self.client = client
         self.connection_info = connection_info
+        self._project_root = project_root
+        self._default_agent = default_agent
         self._command_suggester = CommandSuggester(
             model_provider=self._get_model_suggestions,
             agent_provider=self._get_agent_suggestions,
         )
-
         self._renderer = ChatRenderer(
             get_chat=self._get_chat_container,
             scroll_to_bottom=self._scroll_to_bottom,
         )
-        self._worker = None
+        self._events_worker = None
+        self._last_seq: int | None = None
         self._mounted = False
 
     def compose(self) -> ComposeResult:
@@ -138,32 +151,95 @@ class AgentApp(App):
         self.query_one("#input", Input).focus()
 
         try:
-            bootstrap = await self.client.bootstrap_session()
+            if self._project_root is not None:
+                ws = await self.client.register_workspace(str(self._project_root))
+            else:
+                ws = await self.client.get_workspace(GLOBAL_WORKSPACE_ID)
+            self.workspace_id = ws.id
+            self.workspace_name = ws.name
+
+            threads = await self.client.list_threads(self.workspace_id)
+            if threads:
+                active_thread = threads[0]
+            else:
+                active_thread = await self.client.create_thread(
+                    self.workspace_id,
+                    agent_id=self._default_agent,
+                )
         except Exception as exc:
-            self._add_system_message(f"Failed to load session: {exc}")
+            self._add_system_message(f"Failed to connect to daemon: {exc}")
             return
 
-        self.session_id = bootstrap.session_id
         self.action_clear_chat()
-        self._apply_thread_state(bootstrap)
-        self._scroll_to_bottom()
+        self._apply_thread(active_thread)
+        await self._hydrate_current_thread()
+        self._events_worker = self.run_worker(self._subscribe_events(), exclusive=False)
 
     async def on_shutdown(self) -> None:
+        if self._events_worker is not None:
+            self._events_worker.cancel()
         await self.client.close()
+
+    # -------------------------------------------------------------------------
+    # Event Bus Subscription
+    # -------------------------------------------------------------------------
+
+    async def _subscribe_events(self) -> None:
+        while True:
+            try:
+                async for event in self.client.iter_events(
+                    workspace_id=self.workspace_id,
+                    after_seq=self._last_seq,
+                ):
+                    self._last_seq = event.seq
+                    if isinstance(event, BusResyncRequiredEvent):
+                        await self._reload_current_thread()
+                        continue
+                    if event.thread_id != self.thread_id:
+                        continue
+                    if isinstance(event, ThreadUpdatedEvent):
+                        self._apply_thread(event.data)
+                        continue
+                    if isinstance(event, ThreadClearedEvent):
+                        self.action_clear_chat()
+                        continue
+                    if isinstance(event, RunStartedEvent):
+                        self.active_run_id = event.data.id
+                        self._set_status("running", streaming=True)
+                        continue
+                    if isinstance(event, RunWaitingApprovalEvent):
+                        self.active_run_id = event.data.run.id
+                        self._set_status("approval", streaming=True)
+                        continue
+                    if isinstance(event, (RunCompletedEvent, RunCancelledEvent, RunFailedEvent)):
+                        if self.active_run_id == event.data.id:
+                            self.active_run_id = None
+                        self._set_status("")
+                    self._renderer.handle_event(event)
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                await asyncio.sleep(1.0)
 
     # -------------------------------------------------------------------------
     # Actions
     # -------------------------------------------------------------------------
 
     def action_cancel_run(self) -> None:
-        if self._worker and self._worker.is_running:
-            self._worker.cancel()
-            self._set_status("")
+        if self.active_run_id:
+            run_id = self.active_run_id
+            self.run_worker(self._cancel_active_run(run_id), exclusive=False)
+
+    async def _cancel_active_run(self, run_id: str) -> None:
+        try:
+            await self.client.cancel_run(run_id)
+        except Exception as exc:
+            self._add_system_message(f"Failed to cancel run: {exc}")
 
     def action_clear_chat(self) -> None:
         chat = self._get_chat_container()
         chat.remove_children()
-        self._reset_message_state()
+        self._renderer.reset()
 
     # -------------------------------------------------------------------------
     # Input Handling
@@ -181,16 +257,21 @@ class AgentApp(App):
         if command and await self._dispatch_command(command):
             return
 
-        self._add_user_message(user_input)
-        self._worker = self.run_worker(self._run_agent(user_input), exclusive=True)
+        try:
+            created = await self.client.start_run(self.thread_id, user_input)
+            self.active_run_id = created.run.id
+            self._renderer.render_item(created.user_item)
+            self._set_status("running", streaming=True)
+        except Exception as exc:
+            self._add_system_message(f"Run error: {exc}")
 
     @on(Input.Changed, "#input")
     async def handle_input_changed(self, event: Input.Changed) -> None:
         value = event.value.strip()
         if value.startswith("/model") and self.model_state.cache is None and not self.model_state.loading:
-            self.run_worker(self._prefetch_models(), exclusive=False)
+            self.run_worker(self._load_models(), exclusive=False)
         if value.startswith("/agent") and self.agent_state.cache is None and not self.agent_state.loading:
-            self.run_worker(self._prefetch_agents(), exclusive=False)
+            self.run_worker(self._load_agents(), exclusive=False)
 
     async def _dispatch_command(self, command: ParsedCommand) -> bool:
         if command.name == "quit":
@@ -203,9 +284,15 @@ class AgentApp(App):
             self._add_system_message(build_help_text())
             return True
         if command.name == "threads":
-            threads = await self.client.list_threads(self.session_id)
-            listing = ", ".join(threads) if threads else "(none)"
-            self._add_system_message(f"Threads: {listing}")
+            threads = await self.client.list_threads(self.workspace_id)
+            if not threads:
+                self._add_system_message("Threads: (none)")
+            else:
+                lines = [
+                    f"- {t.id}" + (f" ({t.title})" if t.title else "") + (f" [{t.status}]" if t.status != "idle" else "")
+                    for t in threads
+                ]
+                self._add_system_message("Threads:\n" + "\n".join(lines))
             return True
         if command.name == "thread":
             await self._handle_thread_command(command)
@@ -220,24 +307,23 @@ class AgentApp(App):
 
     async def _handle_thread_command(self, command: ParsedCommand) -> None:
         parts = command.args
-
         if not parts:
-            self._add_system_message(f"Current thread: {self.thread_id}")
+            self._add_system_message(f"Current thread: {self.thread_id} (workspace: {self.workspace_name})")
             return
 
         subcommand = parts[0].lower()
-
         if subcommand in {"new", "create"}:
             new_id = parts[1].strip() if len(parts) > 1 else generate_thread_id()
-            if await self._thread_exists(new_id):
-                self._add_system_message(f"Thread '{new_id}' already exists.")
-                return
             try:
-                await self.client.create_thread(self.session_id, new_id)
+                created = await self.client.create_thread(
+                    self.workspace_id,
+                    thread_id=new_id,
+                    agent_id=self._default_agent,
+                )
             except Exception as exc:
                 self._add_system_message(f"Failed to create thread '{new_id}': {exc}")
                 return
-            await self._switch_thread(new_id, created=True)
+            await self._switch_thread(created, created=True)
             return
 
         if subcommand in {"delete", "del", "rm"}:
@@ -252,24 +338,25 @@ class AgentApp(App):
             self._add_system_message(f"Already on thread '{self.thread_id}'.")
             return
         try:
-            exists = await self._thread_exists(target)
-        except Exception as exc:
-            self._add_system_message(f"Failed to load threads: {exc}")
-            return
-        created = False
-        if not exists:
+            thread = await self.client.get_thread(target)
+            created_flag = False
+        except Exception:
             try:
-                await self.client.create_thread(self.session_id, target)
+                thread = await self.client.create_thread(
+                    self.workspace_id,
+                    thread_id=target,
+                    agent_id=self._default_agent,
+                )
+                created_flag = True
             except Exception as exc:
-                self._add_system_message(f"Failed to create thread '{target}': {exc}")
+                self._add_system_message(f"Failed to open thread '{target}': {exc}")
                 return
-            created = True
-        await self._switch_thread(target, created=created)
+        await self._switch_thread(thread, created=created_flag)
 
     async def _handle_agent_command(self, command: ParsedCommand) -> None:
         parts = command.args
         if not parts or parts[0].lower() in {"current", "show"}:
-            await self._refresh_agent()
+            await self._refresh_thread()
             if self.agent_state.current_name and self.agent_state.current_id:
                 self._add_system_message(
                     f"Current agent: {self.agent_state.current_name} ({self.agent_state.current_id})"
@@ -279,33 +366,22 @@ class AgentApp(App):
             return
 
         subcommand = parts[0].lower()
-
         if subcommand == "list":
             query = " ".join(parts[1:]).strip()
             agents = await self._load_agents()
             needle = query.lower()
-            if query:
-                matches = [
-                    (agent_id, name)
-                    for agent_id, name in agents
-                    if needle in agent_id.lower() or needle in name.lower()
-                ]
-            else:
-                matches = agents
-
+            matches = (
+                [(aid, name) for aid, name in agents if needle in aid.lower() or needle in name.lower()]
+                if query
+                else agents
+            )
             if not matches:
                 self._add_system_message(f"No agents found for '{query}'.")
                 return
-
-            limit = 30
-            shown = matches[:limit]
-            header = f"Agents ({len(matches)} match{'es' if len(matches) != 1 else ''}):"
-            lines = [header]
-            for i, (agent_id, name) in enumerate(shown, start=1):
+            lines = [f"Agents ({len(matches)}):"]
+            for i, (agent_id, name) in enumerate(matches[:30], start=1):
                 label = f"{name} — {agent_id}" if name and name != agent_id else agent_id
                 lines.append(f"{i}. {label}")
-            if len(matches) > limit:
-                lines.append(f"... showing first {limit}. Use /agent list <filter> to narrow.")
             self._add_system_message("\n".join(lines))
             return
 
@@ -313,76 +389,45 @@ class AgentApp(App):
             await self._set_thread_agent(None)
             return
 
-        if subcommand == "set":
-            if len(parts) < 2:
-                self._add_system_message("Usage: /agent set <agent-id|number>")
-                return
-            value = " ".join(parts[1:]).strip()
-            agent_id = await self._resolve_agent_id(value)
-            if agent_id is None:
-                return
-            await self._set_thread_agent(agent_id)
-            return
-
-        # Assume /agent <id|number>
-        value = " ".join(parts).strip()
+        value = " ".join(parts[1:] if subcommand == "set" else parts).strip()
         if not value:
-            self._add_system_message("Usage: /agent <agent-id|number>")
+            self._add_system_message("Usage: /agent set <agent-id|number>")
             return
         agent_id = await self._resolve_agent_id(value)
-        if agent_id is None:
-            return
-        await self._set_thread_agent(agent_id)
+        if agent_id is not None:
+            await self._set_thread_agent(agent_id)
 
     async def _handle_model_command(self, command: ParsedCommand) -> None:
         parts = command.args
         if not parts or parts[0].lower() in {"current", "show"}:
-            await self._refresh_model()
-            current = self.model_state.current or "(unknown)"
-            self._add_system_message(f"Current model: {current}")
+            await self._refresh_thread()
+            self._add_system_message(f"Current model: {self.model_state.current or '(unknown)'}")
             return
 
         subcommand = parts[0].lower()
-
         if subcommand == "list":
             query = " ".join(parts[1:]).strip()
             models = await self._load_models()
-            if query:
-                matches = [m for m in models if query.lower() in m.lower()]
-            else:
-                matches = models
-
+            matches = [m for m in models if query.lower() in m.lower()] if query else models
             if not matches:
                 self._add_system_message(f"No models found for '{query}'.")
                 return
-
-            limit = 30
-            shown = matches[:limit]
-            header = f"Models ({len(matches)} match{'es' if len(matches) != 1 else ''}):"
-            lines = [header, *[f"- {model}" for model in shown]]
-            if len(matches) > limit:
-                lines.append(f"... showing first {limit}. Use /model list <filter> to narrow.")
+            shown = matches[:30]
+            lines = [f"Models ({len(matches)}):", *[f"- {m}" for m in shown]]
+            if len(matches) > 30:
+                lines.append("... showing first 30. Use /model list <filter> to narrow.")
             self._add_system_message("\n".join(lines))
             return
 
         if subcommand in {"default", "reset"}:
-            await self._set_session_model(None)
+            await self._set_thread_model(None)
             return
 
-        if subcommand == "set":
-            if len(parts) < 2:
-                self._add_system_message("Usage: /model set <model-name>")
-                return
-            model_name = " ".join(parts[1:]).strip()
-            await self._set_session_model(model_name)
-            return
-
-        # Assume /model <name>
-        model_name = " ".join(parts).strip()
+        model_name = " ".join(parts[1:] if subcommand == "set" else parts).strip()
         if not model_name:
-            self._add_system_message("Usage: /model <model-name>")
+            self._add_system_message("Usage: /model set <model-name>")
             return
-        await self._set_session_model(model_name)
+        await self._set_thread_model(model_name)
 
     async def _load_models(self) -> list[str]:
         if self.model_state.cache is not None:
@@ -391,7 +436,7 @@ class AgentApp(App):
             return self.model_state.cache or []
         self.model_state.loading = True
         try:
-            payload = await self.client.list_thread_models(self.session_id, self.thread_id)
+            payload = await self.client.list_thread_models(self.thread_id)
         except Exception as exc:
             self._add_system_message(f"Failed to load models: {exc}")
             self.model_state.loading = False
@@ -400,9 +445,6 @@ class AgentApp(App):
         self.model_state.default = payload.default_model
         self.model_state.loading = False
         return self.model_state.cache
-
-    async def _prefetch_models(self) -> None:
-        await self._load_models()
 
     def _get_model_suggestions(self) -> list[str]:
         return self.model_state.cache or []
@@ -419,232 +461,148 @@ class AgentApp(App):
             self._add_system_message(f"Failed to load agents: {exc}")
             self.agent_state.loading = False
             return []
-        self.agent_state.cache = [(agent.id, agent.name) for agent in payload.agents]
+        self.agent_state.cache = [(a.id, a.name) for a in payload.agents]
         self.agent_state.default_id = payload.default_agent
         self.agent_state.loading = False
         return self.agent_state.cache
-
-    async def _prefetch_agents(self) -> None:
-        await self._load_agents()
 
     def _get_agent_suggestions(self) -> list[str]:
         if not self.agent_state.cache:
             return []
         return [agent_id for agent_id, _ in self.agent_state.cache]
 
-    async def _refresh_thread_state(self) -> bool:
-        try:
-            state = await self.client.get_thread_state(self.session_id, self.thread_id)
-        except Exception as exc:
-            self._add_system_message(f"Failed to load thread state: {exc}")
-            return False
-        self._apply_thread_selection(state)
-        return True
-
-    async def _refresh_agent(self) -> None:
-        if not await self._refresh_thread_state():
-            return
-
     async def _resolve_agent_id(self, value: str) -> str | None:
-        value = value.strip()
-        if not value:
-            self._add_system_message("Usage: /agent set <agent-id|number>")
-            return None
-
         if value.isdigit():
             idx = int(value)
-            if idx <= 0:
-                self._add_system_message("Agent number must be >= 1.")
-                return None
             agents = await self._load_agents()
-            if idx > len(agents):
+            if idx <= 0 or idx > len(agents):
                 self._add_system_message(f"Agent number out of range (1-{len(agents)}).")
                 return None
             return agents[idx - 1][0]
-
         return value
+
+    async def _refresh_thread(self) -> None:
+        try:
+            thread = await self.client.get_thread(self.thread_id)
+        except Exception as exc:
+            self._add_system_message(f"Failed to load thread: {exc}")
+            return
+        self._apply_thread(thread)
 
     async def _set_thread_agent(self, agent_id: str | None) -> None:
         try:
-            state = await self.client.update_thread_state(
-                self.session_id,
-                self.thread_id,
-                agent=agent_id,
-            )
+            thread = await self.client.update_thread(self.thread_id, agent_id=agent_id)
         except Exception as exc:
             self._add_system_message(f"Failed to set agent: {exc}")
             return
-        self._apply_thread_selection(state)
-
+        self._apply_thread(thread)
         label = self.agent_state.label()
-        if state.agent.is_default:
+        if thread.resolved_agent.is_default:
             self._add_system_message(f"Agent reset to default: {label}")
         else:
             self._add_system_message(f"Agent set to: {label}")
 
-    async def _refresh_model(self) -> None:
-        if not await self._refresh_thread_state():
-            return
-
-    async def _set_session_model(self, model_name: str | None) -> None:
+    async def _set_thread_model(self, model_name: str | None) -> None:
         try:
-            state = await self.client.update_thread_state(
-                self.session_id,
-                self.thread_id,
-                model=model_name,
-            )
+            thread = await self.client.update_thread(self.thread_id, model=model_name)
         except Exception as exc:
             self._add_system_message(f"Failed to set model: {exc}")
             return
-        self._apply_thread_selection(state)
-        if state.model.is_default:
-            self._add_system_message(f"Model reset to default: {state.model.model}")
+        self._apply_thread(thread)
+        if thread.resolved_model.is_default:
+            self._add_system_message(f"Model reset to default: {thread.resolved_model.model}")
         else:
-            self._add_system_message(f"Model set to: {state.model.model}")
+            self._add_system_message(f"Model set to: {thread.resolved_model.model}")
 
     async def _clear_current_thread(self) -> None:
         self.action_clear_chat()
         try:
-            await self.client.clear_thread(self.session_id, self.thread_id)
-        except Exception as exc:  # pragma: no cover - UI fallback
+            await self.client.clear_thread(self.thread_id)
+        except Exception as exc:
             self._add_system_message(f"Failed to clear thread: {exc}")
 
     # -------------------------------------------------------------------------
-    # Agent Streaming
+    # Thread Management & Rendering Helpers
     # -------------------------------------------------------------------------
 
-    async def _run_agent(self, user_input: str) -> None:
-        self._set_status("streaming", streaming=True)
-        self._reset_message_state()
-
-        run_input = self._build_run_input(user_input)
-
-        try:
-            async for event in self.client.run_stream(run_input):
-                self._renderer.handle_stream_event(event)
-        except Exception as exc:
-            self._add_system_message(f"Run error: {exc}")
-        finally:
-            self._set_status("")
-            self._scroll_to_bottom()
-
-    def _build_run_input(self, user_input: str) -> SubmitMessage:
-        return SubmitMessage(
-            id=uuid4().hex,
-            messages=[
-                UIMessage(
-                    id=uuid4().hex,
-                    role="user",
-                    parts=[TextUIPart(text=user_input)],
-                )
-            ],
-            session_id=self.session_id,
-            thread_id=self.thread_id,
-        )
-
-    # -------------------------------------------------------------------------
-    # Message Helpers
-    # -------------------------------------------------------------------------
-
-    def _reset_message_state(self) -> None:
-        self._renderer.reset()
-
-    def _add_user_message(self, content: str) -> None:
-        self._renderer.add_user_message(content)
-
-    def _add_assistant_message(self, content: str) -> None:
-        self._renderer.add_assistant_message(content)
-
-    def _add_thinking_message(self, content: str) -> None:
-        self._renderer.add_thinking_message(content)
-
-    def _add_system_message(self, content: str) -> None:
-        self._renderer.add_system_message(content)
-
-    def _hydrate_ui_messages(self, messages: list[UIMessage]) -> None:
-        self._renderer.hydrate_ui_messages(messages)
-
-    def _scroll_to_bottom(self) -> None:
-        chat = self._get_chat_container()
-        chat.scroll_end(animate=False)
-
-    def _get_chat_container(self) -> VerticalScroll:
-        return self.query_one("#chat-scroll", VerticalScroll)
-
-    def _set_status(self, text: str, streaming: bool = False) -> None:
-        status = self.query_one("#status", Static)
-        status.update(text)
-        status.set_class(streaming, "streaming")
-
-    # -------------------------------------------------------------------------
-    # Thread Management
-    # -------------------------------------------------------------------------
-
-    def _apply_thread_selection(self, state) -> None:
+    def _apply_thread(self, thread: ThreadResponse) -> None:
         previous_thread = self.thread_id
         previous_agent = self.agent_state.current_id
-        self.thread_id = state.thread_id
-        self.agent_state.current_id = state.agent.agent
-        self.agent_state.current_name = state.agent.agent_name
-        self.agent_state.default_id = state.agent.default_agent
-        self.model_state.current = state.model.model
-        self.model_state.default = state.model.default_model
+        self.thread_id = thread.id
+        self.active_run_id = thread.active_run_id
+        self.agent_state.current_id = thread.resolved_agent.agent
+        self.agent_state.current_name = thread.resolved_agent.agent_name
+        self.agent_state.default_id = thread.resolved_agent.default_agent
+        self.model_state.current = thread.resolved_model.model
+        self.model_state.default = thread.resolved_model.default_model
         if self.thread_id != previous_thread or self.agent_state.current_id != previous_agent:
             self.model_state.cache = None
             self.model_state.loading = False
+        if thread.status == "running":
+            self._set_status("running", streaming=True)
+        elif thread.status == "waiting_approval":
+            self._set_status("approval", streaming=True)
+        else:
+            self._set_status("")
         self._update_header()
 
-    def _apply_thread_state(self, state) -> None:
-        self._apply_thread_selection(state)
-        self._hydrate_ui_messages(state.messages)
+    async def _hydrate_current_thread(self) -> None:
+        try:
+            listing = await self.client.list_thread_items(self.thread_id)
+            self._renderer.hydrate_items(listing.items)
+        except Exception as exc:
+            self._add_system_message(f"Failed to load history: {exc}")
+        self._scroll_to_bottom()
 
-    async def _thread_exists(self, thread_id: str) -> bool:
-        return thread_id in await self.client.list_threads(self.session_id)
-
-    async def _switch_thread(self, new_thread_id: str, *, created: bool = False) -> None:
+    async def _reload_current_thread(self) -> None:
         self.action_clear_chat()
-        if not await self._load_thread_state(new_thread_id):
-            return
+        await self._refresh_thread()
+        await self._hydrate_current_thread()
 
+    async def _switch_thread(self, thread: ThreadResponse, *, created: bool = False) -> None:
+        self.action_clear_chat()
+        self._apply_thread(thread)
+        await self._hydrate_current_thread()
         if created:
             self._add_system_message(f"Created thread '{self.thread_id}'.")
         else:
             self._add_system_message(f"Switched to thread '{self.thread_id}'.")
 
-    async def _load_thread_state(self, thread_id: str) -> bool:
-        try:
-            state = await self.client.get_thread_state(self.session_id, thread_id)
-            self._apply_thread_state(state)
-        except Exception as exc:
-            self._add_system_message(f"Failed to load history: {exc}")
-            return False
-        self._scroll_to_bottom()
-        return True
-
     async def _delete_thread(self, thread_id: str) -> None:
-        threads = await self.client.list_threads(self.session_id)
-
-        if thread_id not in threads:
-            self._add_system_message(f"Thread '{thread_id}' not found.")
+        try:
+            await self.client.delete_thread(thread_id)
+        except Exception as exc:
+            self._add_system_message(f"Failed to delete thread '{thread_id}': {exc}")
             return
 
         if thread_id != self.thread_id:
-            await self.client.delete_thread(self.session_id, thread_id)
             self._add_system_message(f"Deleted thread '{thread_id}'.")
             return
 
-        await self.client.delete_thread(self.session_id, thread_id)
-        remaining = [t for t in threads if t != thread_id]
-
-        if remaining:
-            self.action_clear_chat()
-            await self._load_thread_state(remaining[0])
-            self._add_system_message(f"Deleted '{thread_id}'. Switched to '{remaining[0]}'.")
+        threads = await self.client.list_threads(self.workspace_id)
+        if threads:
+            await self._switch_thread(threads[0])
+            self._add_system_message(f"Deleted '{thread_id}'. Switched to '{threads[0].id}'.")
         else:
-            self.action_clear_chat()
-            await self.client.create_thread(self.session_id, "default")
-            await self._load_thread_state("default")
-            self._add_system_message(f"Deleted '{thread_id}'. Created 'default'.")
+            created = await self.client.create_thread(self.workspace_id, agent_id=self._default_agent)
+            await self._switch_thread(created, created=True)
+            self._add_system_message(f"Deleted '{thread_id}'. Created '{created.id}'.")
+
+    def _add_system_message(self, content: str) -> None:
+        self._renderer.add_system_message(content)
+
+    def _scroll_to_bottom(self) -> None:
+        self._get_chat_container().scroll_end(animate=False)
+
+    def _get_chat_container(self) -> VerticalScroll:
+        return self.query_one("#chat-scroll", VerticalScroll)
+
+    def _set_status(self, text: str, streaming: bool = False) -> None:
+        if not self._mounted:
+            return
+        status = self.query_one("#status", Static)
+        status.update(text)
+        status.set_class(streaming, "streaming")
 
     def _update_header(self) -> None:
         if not self._mounted:
@@ -652,8 +610,7 @@ class AgentApp(App):
         header_left = self.query_one("#header-left", Static)
         header_right = self.query_one("#header-right", Static)
 
-        # Build header parts: thread | agent | model | connection
-        parts = [self.thread_id]
+        parts = [self.workspace_name, self.thread_id]
         if self.agent_state.current_name:
             parts.append(self.agent_state.current_name)
         elif self.agent_state.current_id:
@@ -671,5 +628,12 @@ def run_tui(
     *,
     client: AgentClient,
     connection_info: ConnectionInfo | None = None,
+    project_root: Path | None = None,
+    default_agent: str | None = None,
 ) -> None:
-    AgentApp(client=client, connection_info=connection_info).run()
+    AgentApp(
+        client=client,
+        connection_info=connection_info,
+        project_root=project_root,
+        default_agent=default_agent,
+    ).run()

@@ -4,7 +4,7 @@ import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { ScrollArea } from "@/shared/ui/scroll-area";
 import { cn } from "@/shared/utils";
-import { type AgentInfo } from "@/services/lattisApi";
+import { type AgentInfo } from "@/services/lattisClient";
 
 type AgentSelectorProps = {
   agentId: string | null;

@@ -9,6 +9,10 @@ export interface paths {
     /** Api List Agents */
     get: operations["api_list_agents_agents_get"];
   };
+  "/events": {
+    /** Api Events */
+    get: operations["api_events_events_get"];
+  };
   "/health": {
     /** Health */
     get: operations["health_health_get"];
@@ -17,37 +21,83 @@ export interface paths {
     /** Info */
     get: operations["info_info_get"];
   };
-  "/session/bootstrap": {
-    /** Api Session Bootstrap */
-    get: operations["api_session_bootstrap_session_bootstrap_get"];
+  "/runs/{run_id}": {
+    /** Api Get Run */
+    get: operations["api_get_run_runs__run_id__get"];
   };
-  "/sessions/{session_id}/threads": {
-    /** Api List Threads */
-    get: operations["api_list_threads_sessions__session_id__threads_get"];
-    /** Api Create Thread */
-    post: operations["api_create_thread_sessions__session_id__threads_post"];
+  "/runs/{run_id}/approvals/{approval_id}": {
+    /** Api Resolve Approval */
+    post: operations["api_resolve_approval_runs__run_id__approvals__approval_id__post"];
   };
-  "/sessions/{session_id}/threads/{thread_id}": {
+  "/runs/{run_id}/cancel": {
+    /** Api Cancel Run */
+    post: operations["api_cancel_run_runs__run_id__cancel_post"];
+  };
+  "/threads/{thread_id}": {
+    /** Api Get Thread */
+    get: operations["api_get_thread_threads__thread_id__get"];
     /** Api Delete Thread */
-    delete: operations["api_delete_thread_sessions__session_id__threads__thread_id__delete"];
+    delete: operations["api_delete_thread_threads__thread_id__delete"];
+    /** Api Update Thread */
+    patch: operations["api_update_thread_threads__thread_id__patch"];
   };
-  "/sessions/{session_id}/threads/{thread_id}/clear": {
+  "/threads/{thread_id}/clear": {
     /** Api Clear Thread */
-    post: operations["api_clear_thread_sessions__session_id__threads__thread_id__clear_post"];
+    post: operations["api_clear_thread_threads__thread_id__clear_post"];
   };
-  "/sessions/{session_id}/threads/{thread_id}/models": {
+  "/threads/{thread_id}/items": {
+    /** Api List Thread Items */
+    get: operations["api_list_thread_items_threads__thread_id__items_get"];
+  };
+  "/threads/{thread_id}/models": {
     /** Api List Thread Models */
-    get: operations["api_list_thread_models_sessions__session_id__threads__thread_id__models_get"];
+    get: operations["api_list_thread_models_threads__thread_id__models_get"];
   };
-  "/sessions/{session_id}/threads/{thread_id}/state": {
-    /** Api Thread State */
-    get: operations["api_thread_state_sessions__session_id__threads__thread_id__state_get"];
-    /** Api Update Thread State */
-    patch: operations["api_update_thread_state_sessions__session_id__threads__thread_id__state_patch"];
+  "/threads/{thread_id}/runs": {
+    /** Api List Runs */
+    get: operations["api_list_runs_threads__thread_id__runs_get"];
+    /** Api Start Run */
+    post: operations["api_start_run_threads__thread_id__runs_post"];
   };
-  "/ui/chat": {
-    /** Ui Chat */
-    post: operations["ui_chat_ui_chat_post"];
+  "/workspaces": {
+    /** Api List Workspaces */
+    get: operations["api_list_workspaces_workspaces_get"];
+    /** Api Register Workspace */
+    post: operations["api_register_workspace_workspaces_post"];
+  };
+  "/workspaces/{workspace_id}": {
+    /** Api Get Workspace */
+    get: operations["api_get_workspace_workspaces__workspace_id__get"];
+    /** Api Delete Workspace */
+    delete: operations["api_delete_workspace_workspaces__workspace_id__delete"];
+    /** Api Update Workspace */
+    patch: operations["api_update_workspace_workspaces__workspace_id__patch"];
+  };
+  "/workspaces/{workspace_id}/file": {
+    /** Api Read Workspace File */
+    get: operations["api_read_workspace_file_workspaces__workspace_id__file_get"];
+  };
+  "/workspaces/{workspace_id}/files": {
+    /** Api List Workspace Files */
+    get: operations["api_list_workspace_files_workspaces__workspace_id__files_get"];
+  };
+  "/workspaces/{workspace_id}/git/diff": {
+    /** Api Workspace Git Diff */
+    get: operations["api_workspace_git_diff_workspaces__workspace_id__git_diff_get"];
+  };
+  "/workspaces/{workspace_id}/git/status": {
+    /** Api Workspace Git Status */
+    get: operations["api_workspace_git_status_workspaces__workspace_id__git_status_get"];
+  };
+  "/workspaces/{workspace_id}/plugins/{agent_id}/state": {
+    /** Api Get Plugin State */
+    get: operations["api_get_plugin_state_workspaces__workspace_id__plugins__agent_id__state_get"];
+  };
+  "/workspaces/{workspace_id}/threads": {
+    /** Api List Threads */
+    get: operations["api_list_threads_workspaces__workspace_id__threads_get"];
+    /** Api Create Thread */
+    post: operations["api_create_thread_workspaces__workspace_id__threads_post"];
   };
 }
 
@@ -57,6 +107,13 @@ export interface components {
   schemas: {
     /** AgentInfo */
     AgentInfo: {
+      /** Default Model */
+      default_model?: string | null;
+      /**
+       * Has State
+       * @default false
+       */
+      has_state?: boolean;
       /** Id */
       id: string;
       /** Name */
@@ -69,166 +126,286 @@ export interface components {
       /** Default Agent */
       default_agent: string;
     };
-    /**
-     * DataUIPart
-     * @description Data part with dynamic type based on data name.
-     */
-    DataUIPart: {
-      /** Data */
-      data: unknown;
-      /** Id */
-      id?: string | null;
-      /** Type */
-      type: string;
+    /** ApprovalResolveRequest */
+    ApprovalResolveRequest: {
+      /** Approved */
+      approved: boolean;
+      /** Reason */
+      reason?: string | null;
     };
-    /**
-     * DynamicToolInputAvailablePart
-     * @description Dynamic tool part in input-available state.
-     */
-    DynamicToolInputAvailablePart: {
-      /** Callprovidermetadata */
-      callProviderMetadata?: {
-        [key: string]: {
-          [key: string]: unknown;
-        };
-      } | null;
-      /** Input */
-      input: unknown;
+    /** ApprovalResolveResponse */
+    ApprovalResolveResponse: {
+      approval_item: components["schemas"]["ItemResponse"];
+      run: components["schemas"]["RunResponse"];
+    };
+    /** BusResyncRequiredEvent */
+    BusResyncRequiredEvent: {
+      data: components["schemas"]["ResyncRequiredData"];
       /**
-       * State
-       * @default input-available
-       * @constant
+       * Run Id
+       * @default null
        */
-      state?: "input-available";
-      /** Toolcallid */
-      toolCallId: string;
-      /** Toolname */
-      toolName: string;
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
       /**
        * Type
-       * @default dynamic-tool
+       * @default bus.resync_required
        * @constant
        */
-      type?: "dynamic-tool";
+      type?: "bus.resync_required";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
     };
     /**
-     * DynamicToolInputStreamingPart
-     * @description Dynamic tool part in input-streaming state.
+     * EventSchemaEnvelope
+     * @description Wrapper schema used to export the full LattisEvent union into OpenAPI.
      */
-    DynamicToolInputStreamingPart: {
-      /** Input */
-      input?: unknown;
-      /**
-       * State
-       * @default input-streaming
-       * @constant
-       */
-      state?: "input-streaming";
-      /** Toolcallid */
-      toolCallId: string;
-      /** Toolname */
-      toolName: string;
-      /**
-       * Type
-       * @default dynamic-tool
-       * @constant
-       */
-      type?: "dynamic-tool";
+    EventSchemaEnvelope: {
+      /** Event */
+      event: components["schemas"]["BusResyncRequiredEvent"] | components["schemas"]["WorkspaceCreatedEvent"] | components["schemas"]["WorkspaceUpdatedEvent"] | components["schemas"]["WorkspaceDeletedEvent"] | components["schemas"]["ThreadCreatedEvent"] | components["schemas"]["ThreadUpdatedEvent"] | components["schemas"]["ThreadDeletedEvent"] | components["schemas"]["ThreadClearedEvent"] | components["schemas"]["RunStartedEvent"] | components["schemas"]["RunWaitingApprovalEvent"] | components["schemas"]["RunCompletedEvent"] | components["schemas"]["RunCancelledEvent"] | components["schemas"]["RunFailedEvent"] | components["schemas"]["ItemCreatedEvent"] | components["schemas"]["ItemDeltaEvent"] | components["schemas"]["ItemCompletedEvent"] | components["schemas"]["PluginStateUpdatedEvent"];
     };
-    /**
-     * DynamicToolOutputAvailablePart
-     * @description Dynamic tool part in output-available state.
-     */
-    DynamicToolOutputAvailablePart: {
-      /** Callprovidermetadata */
-      callProviderMetadata?: {
-        [key: string]: {
-          [key: string]: unknown;
-        };
-      } | null;
-      /** Input */
-      input: unknown;
-      /** Output */
-      output: unknown;
-      /** Preliminary */
-      preliminary?: boolean | null;
+    /** FileEntryResponse */
+    FileEntryResponse: {
       /**
-       * State
-       * @default output-available
-       * @constant
+       * Kind
+       * @enum {string}
        */
-      state?: "output-available";
-      /** Toolcallid */
-      toolCallId: string;
-      /** Toolname */
-      toolName: string;
-      /**
-       * Type
-       * @default dynamic-tool
-       * @constant
-       */
-      type?: "dynamic-tool";
+      kind: "dir" | "file";
+      /** Mtime */
+      mtime?: number | null;
+      /** Name */
+      name: string;
+      /** Path */
+      path: string;
+      /** Size */
+      size?: number | null;
     };
-    /**
-     * DynamicToolOutputErrorPart
-     * @description Dynamic tool part in output-error state.
-     */
-    DynamicToolOutputErrorPart: {
-      /** Callprovidermetadata */
-      callProviderMetadata?: {
-        [key: string]: {
-          [key: string]: unknown;
-        };
-      } | null;
-      /** Errortext */
-      errorText: string;
-      /** Input */
-      input: unknown;
+    /** GitDiffResponse */
+    GitDiffResponse: {
       /**
-       * State
-       * @default output-error
-       * @constant
+       * Diff
+       * @default
        */
-      state?: "output-error";
-      /** Toolcallid */
-      toolCallId: string;
-      /** Toolname */
-      toolName: string;
+      diff?: string;
+      /** Is Git Repo */
+      is_git_repo: boolean;
+      /** Path */
+      path?: string | null;
       /**
-       * Type
-       * @default dynamic-tool
-       * @constant
+       * Staged
+       * @default false
        */
-      type?: "dynamic-tool";
+      staged?: boolean;
+      /**
+       * Truncated
+       * @default false
+       */
+      truncated?: boolean;
+      /** Workspace Id */
+      workspace_id: string;
     };
-    /**
-     * FileUIPart
-     * @description A file part of a message.
-     */
-    FileUIPart: {
-      /** Filename */
-      filename?: string | null;
-      /** Mediatype */
-      mediaType: string;
-      /** Providermetadata */
-      providerMetadata?: {
-        [key: string]: {
-          [key: string]: unknown;
-        };
-      } | null;
+    /** GitFileStatusResponse */
+    GitFileStatusResponse: {
+      /** Index Status */
+      index_status: string;
+      /** Path */
+      path: string;
       /**
-       * Type
-       * @default file
-       * @constant
+       * Status
+       * @enum {string}
        */
-      type?: "file";
-      /** Url */
-      url: string;
+      status: "modified" | "added" | "deleted" | "renamed" | "untracked" | "conflicted";
+      /** Worktree Status */
+      worktree_status: string;
+    };
+    /** GitStatusResponse */
+    GitStatusResponse: {
+      /**
+       * Ahead
+       * @default 0
+       */
+      ahead?: number;
+      /**
+       * Behind
+       * @default 0
+       */
+      behind?: number;
+      /** Branch */
+      branch?: string | null;
+      /** Files */
+      files?: components["schemas"]["GitFileStatusResponse"][];
+      /** Is Git Repo */
+      is_git_repo: boolean;
+      /** Workspace Id */
+      workspace_id: string;
     };
     /** HTTPValidationError */
     HTTPValidationError: {
       /** Detail */
       detail?: components["schemas"]["ValidationError"][];
+    };
+    /** HealthResponse */
+    HealthResponse: {
+      /**
+       * Status
+       * @default ok
+       * @constant
+       */
+      status?: "ok";
+    };
+    /** ItemCompletedEvent */
+    ItemCompletedEvent: {
+      data: components["schemas"]["ItemResponse"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default item.completed
+       * @constant
+       */
+      type?: "item.completed";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
+    };
+    /** ItemCreatedEvent */
+    ItemCreatedEvent: {
+      data: components["schemas"]["ItemResponse"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default item.created
+       * @constant
+       */
+      type?: "item.created";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
+    };
+    /** ItemDeltaData */
+    ItemDeltaData: {
+      /**
+       * Channel
+       * @enum {string}
+       */
+      channel: "text" | "reasoning" | "tool_input" | "tool_output";
+      /** Delta */
+      delta: string;
+      /** Item Id */
+      item_id: string;
+      /**
+       * Stream
+       * @default null
+       */
+      stream?: ("stdout" | "stderr") | null;
+    };
+    /** ItemDeltaEvent */
+    ItemDeltaEvent: {
+      data: components["schemas"]["ItemDeltaData"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default item.delta
+       * @constant
+       */
+      type?: "item.delta";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
+    };
+    /** ItemListResponse */
+    ItemListResponse: {
+      /**
+       * Has More
+       * @default false
+       */
+      has_more?: boolean;
+      /** Items */
+      items: components["schemas"]["ItemResponse"][];
+    };
+    /** ItemResponse */
+    ItemResponse: {
+      /** Created At */
+      created_at: number;
+      /** Id */
+      id: string;
+      /**
+       * Kind
+       * @enum {string}
+       */
+      kind: "user_message" | "assistant_text" | "reasoning" | "tool_call" | "approval_request" | "system_note";
+      /** Payload */
+      payload: {
+        [key: string]: unknown;
+      };
+      /** Run Id */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Status
+       * @enum {string}
+       */
+      status: "streaming" | "completed" | "error" | "cancelled";
+      /** Thread Id */
+      thread_id: string;
+      /** Updated At */
+      updated_at: number;
     };
     /** ModelListResponse */
     ModelListResponse: {
@@ -237,155 +414,279 @@ export interface components {
       /** Models */
       models: string[];
     };
-    /**
-     * ReasoningUIPart
-     * @description A reasoning part of a message.
-     */
-    ReasoningUIPart: {
-      /** Providermetadata */
-      providerMetadata?: {
-        [key: string]: {
-          [key: string]: unknown;
-        };
-      } | null;
+    /** PluginStateResponse */
+    PluginStateResponse: {
+      /** Agent Id */
+      agent_id: string;
       /** State */
-      state?: ("streaming" | "done") | null;
-      /** Text */
-      text: string;
+      state?: {
+        [key: string]: unknown;
+      } | null;
+      /** Workspace Id */
+      workspace_id: string;
+    };
+    /** PluginStateUpdatedEvent */
+    PluginStateUpdatedEvent: {
+      data: components["schemas"]["PluginStateResponse"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
       /**
        * Type
-       * @default reasoning
+       * @default plugin.state_updated
        * @constant
        */
-      type?: "reasoning";
+      type?: "plugin.state_updated";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
+    };
+    /** ResyncRequiredData */
+    ResyncRequiredData: {
+      /**
+       * Earliest Seq
+       * @default null
+       */
+      earliest_seq?: number | null;
+      /** Latest Seq */
+      latest_seq: number;
+      /** Reason */
+      reason: string;
+    };
+    /** RunCancelledEvent */
+    RunCancelledEvent: {
+      data: components["schemas"]["RunResponse"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default run.cancelled
+       * @constant
+       */
+      type?: "run.cancelled";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
+    };
+    /** RunCompletedEvent */
+    RunCompletedEvent: {
+      data: components["schemas"]["RunResponse"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default run.completed
+       * @constant
+       */
+      type?: "run.completed";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
+    };
+    /** RunCreateRequest */
+    RunCreateRequest: {
+      /** Input */
+      input: string;
+    };
+    /** RunCreateResponse */
+    RunCreateResponse: {
+      run: components["schemas"]["RunResponse"];
+      user_item: components["schemas"]["ItemResponse"];
+    };
+    /** RunFailedEvent */
+    RunFailedEvent: {
+      data: components["schemas"]["RunResponse"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default run.failed
+       * @constant
+       */
+      type?: "run.failed";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
+    };
+    /** RunListResponse */
+    RunListResponse: {
+      /** Runs */
+      runs: components["schemas"]["RunResponse"][];
+    };
+    /** RunResponse */
+    RunResponse: {
+      /** Agent Id */
+      agent_id: string;
+      /** Ended At */
+      ended_at?: number | null;
+      /** Error */
+      error?: string | null;
+      /** Id */
+      id: string;
+      /** Model */
+      model: string;
+      /** Started At */
+      started_at: number;
+      /**
+       * Status
+       * @enum {string}
+       */
+      status: "running" | "waiting_approval" | "completed" | "cancelled" | "failed";
+      /** Thread Id */
+      thread_id: string;
+      /** Usage */
+      usage?: {
+        [key: string]: unknown;
+      } | null;
+      /** Workspace Id */
+      workspace_id: string;
+    };
+    /** RunStartedEvent */
+    RunStartedEvent: {
+      data: components["schemas"]["RunResponse"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default run.started
+       * @constant
+       */
+      type?: "run.started";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
+    };
+    /** RunWaitingApprovalData */
+    RunWaitingApprovalData: {
+      /** Approval Items */
+      approval_items: components["schemas"]["ItemResponse"][];
+      run: components["schemas"]["RunResponse"];
+    };
+    /** RunWaitingApprovalEvent */
+    RunWaitingApprovalEvent: {
+      data: components["schemas"]["RunWaitingApprovalData"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default run.waiting_approval
+       * @constant
+       */
+      type?: "run.waiting_approval";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
     };
     /** ServerInfoResponse */
     ServerInfoResponse: {
-      /** Agent Name */
-      agent_name?: string | null;
-      /** Data Dir */
-      data_dir: string;
+      /**
+       * Active Runs
+       * @default 0
+       */
+      active_runs?: number;
+      /**
+       * Auth Enabled
+       * @default true
+       */
+      auth_enabled?: boolean;
+      /** Default Agent */
+      default_agent: string;
+      /** Lattis Home */
+      lattis_home: string;
       /** Pid */
       pid: number;
-      /** Project Root */
-      project_root: string;
       /** Version */
       version: string;
-      /** Workspace Dir */
-      workspace_dir: string;
-    };
-    /** SessionBootstrapResponse */
-    SessionBootstrapResponse: {
-      agent: components["schemas"]["ThreadAgentResponse"];
-      /** Messages */
-      messages: components["schemas"]["UIMessage"][];
-      model: components["schemas"]["SessionModelResponse"];
-      /** Session Id */
-      session_id: string;
-      /** Thread Id */
-      thread_id: string;
-      /** Threads */
-      threads: string[];
-    };
-    /** SessionModelResponse */
-    SessionModelResponse: {
-      /** Default Model */
-      default_model: string;
-      /** Is Default */
-      is_default: boolean;
-      /** Model */
-      model: string;
-    };
-    /**
-     * SourceDocumentUIPart
-     * @description A document source part of a message.
-     */
-    SourceDocumentUIPart: {
-      /** Filename */
-      filename?: string | null;
-      /** Mediatype */
-      mediaType: string;
-      /** Providermetadata */
-      providerMetadata?: {
-        [key: string]: {
-          [key: string]: unknown;
-        };
-      } | null;
-      /** Sourceid */
-      sourceId: string;
-      /** Title */
-      title: string;
-      /**
-       * Type
-       * @default source-document
-       * @constant
-       */
-      type?: "source-document";
-    };
-    /**
-     * SourceUrlUIPart
-     * @description A source part of a message.
-     */
-    SourceUrlUIPart: {
-      /** Providermetadata */
-      providerMetadata?: {
-        [key: string]: {
-          [key: string]: unknown;
-        };
-      } | null;
-      /** Sourceid */
-      sourceId: string;
-      /** Title */
-      title?: string | null;
-      /**
-       * Type
-       * @default source-url
-       * @constant
-       */
-      type?: "source-url";
-      /** Url */
-      url: string;
-    };
-    /**
-     * StepStartUIPart
-     * @description A step boundary part of a message.
-     */
-    StepStartUIPart: {
-      /**
-       * Type
-       * @default step-start
-       * @constant
-       */
-      type?: "step-start";
-    };
-    /**
-     * TextUIPart
-     * @description A text part of a message.
-     */
-    TextUIPart: {
-      /** Providermetadata */
-      providerMetadata?: {
-        [key: string]: {
-          [key: string]: unknown;
-        };
-      } | null;
-      /** State */
-      state?: ("streaming" | "done") | null;
-      /** Text */
-      text: string;
-      /**
-       * Type
-       * @default text
-       * @constant
-       */
-      type?: "text";
     };
     /** ThreadAgentResponse */
     ThreadAgentResponse: {
       /** Agent */
       agent: string;
       /** Agent Name */
-      agent_name?: string | null;
+      agent_name: string;
       /** Default Agent */
       default_agent: string;
       /** Is Default */
@@ -396,164 +697,206 @@ export interface components {
       /** Cleared */
       cleared: string;
     };
+    /** ThreadClearedEvent */
+    ThreadClearedEvent: {
+      data: components["schemas"]["ThreadIdData"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default thread.cleared
+       * @constant
+       */
+      type?: "thread.cleared";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
+    };
     /** ThreadCreateRequest */
     ThreadCreateRequest: {
+      /** Agent Id */
+      agent_id?: string | null;
+      /** Model */
+      model?: string | null;
+      /** Settings */
+      settings?: {
+        [key: string]: unknown;
+      } | null;
       /** Thread Id */
       thread_id?: string | null;
+      /**
+       * Title
+       * @default
+       */
+      title?: string;
     };
-    /** ThreadCreateResponse */
-    ThreadCreateResponse: {
-      /** Thread Id */
-      thread_id: string;
+    /** ThreadCreatedEvent */
+    ThreadCreatedEvent: {
+      data: components["schemas"]["ThreadResponse"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default thread.created
+       * @constant
+       */
+      type?: "thread.created";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
     };
     /** ThreadDeleteResponse */
     ThreadDeleteResponse: {
       /** Deleted */
       deleted: string;
     };
-    /** ThreadListResponse */
-    ThreadListResponse: {
-      /** Threads */
-      threads: string[];
+    /** ThreadDeletedEvent */
+    ThreadDeletedEvent: {
+      data: components["schemas"]["ThreadIdData"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default thread.deleted
+       * @constant
+       */
+      type?: "thread.deleted";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
     };
-    /** ThreadStateResponse */
-    ThreadStateResponse: {
-      agent: components["schemas"]["ThreadAgentResponse"];
-      /** Messages */
-      messages: components["schemas"]["UIMessage"][];
-      model: components["schemas"]["SessionModelResponse"];
+    /** ThreadIdData */
+    ThreadIdData: {
       /** Thread Id */
       thread_id: string;
     };
-    /** ThreadStateUpdateRequest */
-    ThreadStateUpdateRequest: {
-      /** Agent */
-      agent?: string | null;
+    /** ThreadListResponse */
+    ThreadListResponse: {
+      /** Threads */
+      threads: components["schemas"]["ThreadResponse"][];
+    };
+    /** ThreadModelResponse */
+    ThreadModelResponse: {
+      /** Default Model */
+      default_model: string;
+      /** Is Default */
+      is_default: boolean;
       /** Model */
-      model?: string | null;
+      model: string;
     };
-    /**
-     * ToolInputAvailablePart
-     * @description Tool part in input-available state.
-     */
-    ToolInputAvailablePart: {
-      /** Callprovidermetadata */
-      callProviderMetadata?: {
-        [key: string]: {
-          [key: string]: unknown;
-        };
-      } | null;
-      /** Input */
-      input?: unknown;
-      /** Providerexecuted */
-      providerExecuted?: boolean | null;
-      /**
-       * State
-       * @default input-available
-       * @constant
-       */
-      state?: "input-available";
-      /** Toolcallid */
-      toolCallId: string;
-      /** Type */
-      type: string;
-    };
-    /**
-     * ToolInputStreamingPart
-     * @description Tool part in input-streaming state.
-     */
-    ToolInputStreamingPart: {
-      /** Input */
-      input?: unknown;
-      /** Providerexecuted */
-      providerExecuted?: boolean | null;
-      /**
-       * State
-       * @default input-streaming
-       * @constant
-       */
-      state?: "input-streaming";
-      /** Toolcallid */
-      toolCallId: string;
-      /** Type */
-      type: string;
-    };
-    /**
-     * ToolOutputAvailablePart
-     * @description Tool part in output-available state.
-     */
-    ToolOutputAvailablePart: {
-      /** Callprovidermetadata */
-      callProviderMetadata?: {
-        [key: string]: {
-          [key: string]: unknown;
-        };
-      } | null;
-      /** Input */
-      input?: unknown;
-      /** Output */
-      output?: unknown;
-      /** Preliminary */
-      preliminary?: boolean | null;
-      /** Providerexecuted */
-      providerExecuted?: boolean | null;
-      /**
-       * State
-       * @default output-available
-       * @constant
-       */
-      state?: "output-available";
-      /** Toolcallid */
-      toolCallId: string;
-      /** Type */
-      type: string;
-    };
-    /**
-     * ToolOutputErrorPart
-     * @description Tool part in output-error state.
-     */
-    ToolOutputErrorPart: {
-      /** Callprovidermetadata */
-      callProviderMetadata?: {
-        [key: string]: {
-          [key: string]: unknown;
-        };
-      } | null;
-      /** Errortext */
-      errorText: string;
-      /** Input */
-      input?: unknown;
-      /** Providerexecuted */
-      providerExecuted?: boolean | null;
-      /** Rawinput */
-      rawInput?: unknown;
-      /**
-       * State
-       * @default output-error
-       * @constant
-       */
-      state?: "output-error";
-      /** Toolcallid */
-      toolCallId: string;
-      /** Type */
-      type: string;
-    };
-    /**
-     * UIMessage
-     * @description A message as displayed in the UI by Vercel AI Elements.
-     */
-    UIMessage: {
+    /** ThreadResponse */
+    ThreadResponse: {
+      /** Active Run Id */
+      active_run_id?: string | null;
+      /** Agent Id */
+      agent_id?: string | null;
+      /** Created At */
+      created_at: number;
       /** Id */
       id: string;
-      /** Metadata */
-      metadata?: unknown;
-      /** Parts */
-      parts: (components["schemas"]["TextUIPart"] | components["schemas"]["ReasoningUIPart"] | components["schemas"]["ToolInputStreamingPart"] | components["schemas"]["ToolInputAvailablePart"] | components["schemas"]["ToolOutputAvailablePart"] | components["schemas"]["ToolOutputErrorPart"] | components["schemas"]["DynamicToolInputStreamingPart"] | components["schemas"]["DynamicToolInputAvailablePart"] | components["schemas"]["DynamicToolOutputAvailablePart"] | components["schemas"]["DynamicToolOutputErrorPart"] | components["schemas"]["SourceUrlUIPart"] | components["schemas"]["SourceDocumentUIPart"] | components["schemas"]["FileUIPart"] | components["schemas"]["DataUIPart"] | components["schemas"]["StepStartUIPart"])[];
+      /** Model */
+      model?: string | null;
+      resolved_agent: components["schemas"]["ThreadAgentResponse"];
+      resolved_model: components["schemas"]["ThreadModelResponse"];
+      /** Settings */
+      settings?: {
+        [key: string]: unknown;
+      };
       /**
-       * Role
+       * Status
        * @enum {string}
        */
-      role: "system" | "user" | "assistant";
+      status: "idle" | "running" | "waiting_approval";
+      /** Title */
+      title: string;
+      /** Updated At */
+      updated_at: number;
+      /** Workspace Id */
+      workspace_id: string;
+    };
+    /** ThreadUpdateRequest */
+    ThreadUpdateRequest: {
+      /** Agent Id */
+      agent_id?: string | null;
+      /** Model */
+      model?: string | null;
+      /** Settings */
+      settings?: {
+        [key: string]: unknown;
+      } | null;
+      /** Title */
+      title?: string | null;
+    };
+    /** ThreadUpdatedEvent */
+    ThreadUpdatedEvent: {
+      data: components["schemas"]["ThreadResponse"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default thread.updated
+       * @constant
+       */
+      type?: "thread.updated";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
     };
     /** ValidationError */
     ValidationError: {
@@ -563,6 +906,181 @@ export interface components {
       msg: string;
       /** Error Type */
       type: string;
+    };
+    /** WorkspaceCreateRequest */
+    WorkspaceCreateRequest: {
+      /** Name */
+      name?: string | null;
+      /** Root Path */
+      root_path: string;
+    };
+    /** WorkspaceCreatedEvent */
+    WorkspaceCreatedEvent: {
+      data: components["schemas"]["WorkspaceResponse"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default workspace.created
+       * @constant
+       */
+      type?: "workspace.created";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
+    };
+    /** WorkspaceDeleteResponse */
+    WorkspaceDeleteResponse: {
+      /** Deleted */
+      deleted: string;
+    };
+    /** WorkspaceDeletedData */
+    WorkspaceDeletedData: {
+      /** Workspace Id */
+      workspace_id: string;
+    };
+    /** WorkspaceDeletedEvent */
+    WorkspaceDeletedEvent: {
+      data: components["schemas"]["WorkspaceDeletedData"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default workspace.deleted
+       * @constant
+       */
+      type?: "workspace.deleted";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
+    };
+    /** WorkspaceFileReadResponse */
+    WorkspaceFileReadResponse: {
+      /** Content */
+      content: string;
+      /**
+       * Is Binary
+       * @default false
+       */
+      is_binary?: boolean;
+      /** Path */
+      path: string;
+      /** Size */
+      size: number;
+      /**
+       * Truncated
+       * @default false
+       */
+      truncated?: boolean;
+      /** Workspace Id */
+      workspace_id: string;
+    };
+    /** WorkspaceFilesResponse */
+    WorkspaceFilesResponse: {
+      /** Entries */
+      entries: components["schemas"]["FileEntryResponse"][];
+      /** Path */
+      path: string;
+      /** Workspace Id */
+      workspace_id: string;
+    };
+    /** WorkspaceListResponse */
+    WorkspaceListResponse: {
+      /** Workspaces */
+      workspaces: components["schemas"]["WorkspaceResponse"][];
+    };
+    /** WorkspaceResponse */
+    WorkspaceResponse: {
+      /** Created At */
+      created_at: number;
+      /** Id */
+      id: string;
+      /**
+       * Kind
+       * @enum {string}
+       */
+      kind: "global" | "project";
+      /** Name */
+      name: string;
+      /** Root Path */
+      root_path: string;
+      /** Settings */
+      settings?: {
+        [key: string]: unknown;
+      };
+      /**
+       * Thread Count
+       * @default 0
+       */
+      thread_count?: number;
+      /** Updated At */
+      updated_at: number;
+    };
+    /** WorkspaceUpdateRequest */
+    WorkspaceUpdateRequest: {
+      /** Name */
+      name?: string | null;
+      /** Settings */
+      settings?: {
+        [key: string]: unknown;
+      } | null;
+    };
+    /** WorkspaceUpdatedEvent */
+    WorkspaceUpdatedEvent: {
+      data: components["schemas"]["WorkspaceResponse"];
+      /**
+       * Run Id
+       * @default null
+       */
+      run_id?: string | null;
+      /** Seq */
+      seq: number;
+      /**
+       * Thread Id
+       * @default null
+       */
+      thread_id?: string | null;
+      /** Timestamp */
+      timestamp: number;
+      /**
+       * Type
+       * @default workspace.updated
+       * @constant
+       */
+      type?: "workspace.updated";
+      /**
+       * Workspace Id
+       * @default null
+       */
+      workspace_id?: string | null;
     };
   };
   responses: never;
@@ -580,11 +1098,50 @@ export interface operations {
 
   /** Api List Agents */
   api_list_agents_agents_get: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+    };
     responses: {
       /** @description Successful Response */
       200: {
         content: {
           "application/json": components["schemas"]["AgentListResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Events */
+  api_events_events_get: {
+    parameters: {
+      query?: {
+        workspace_id?: string | null;
+        thread_id?: string | null;
+        after_seq?: number | null;
+        token?: string | null;
+      };
+      header?: {
+        "Last-Event-ID"?: string | null;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
         };
       };
     };
@@ -595,15 +1152,18 @@ export interface operations {
       /** @description Successful Response */
       200: {
         content: {
-          "application/json": {
-            [key: string]: string;
-          };
+          "application/json": components["schemas"]["HealthResponse"];
         };
       };
     };
   };
   /** Info */
   info_info_get: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+    };
     responses: {
       /** @description Successful Response */
       200: {
@@ -611,20 +1171,29 @@ export interface operations {
           "application/json": components["schemas"]["ServerInfoResponse"];
         };
       };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
     };
   };
-  /** Api Session Bootstrap */
-  api_session_bootstrap_session_bootstrap_get: {
+  /** Api Get Run */
+  api_get_run_runs__run_id__get: {
     parameters: {
       query?: {
-        thread_id?: string | null;
+        token?: string | null;
+      };
+      path: {
+        run_id: string;
       };
     };
     responses: {
       /** @description Successful Response */
       200: {
         content: {
-          "application/json": components["schemas"]["SessionBootstrapResponse"];
+          "application/json": components["schemas"]["RunResponse"];
         };
       };
       /** @description Validation Error */
@@ -635,45 +1204,77 @@ export interface operations {
       };
     };
   };
-  /** Api List Threads */
-  api_list_threads_sessions__session_id__threads_get: {
+  /** Api Resolve Approval */
+  api_resolve_approval_runs__run_id__approvals__approval_id__post: {
     parameters: {
+      query?: {
+        token?: string | null;
+      };
       path: {
-        session_id: string;
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        content: {
-          "application/json": components["schemas"]["ThreadListResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  /** Api Create Thread */
-  api_create_thread_sessions__session_id__threads_post: {
-    parameters: {
-      path: {
-        session_id: string;
+        run_id: string;
+        approval_id: string;
       };
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["ThreadCreateRequest"];
+        "application/json": components["schemas"]["ApprovalResolveRequest"];
       };
     };
     responses: {
       /** @description Successful Response */
       200: {
         content: {
-          "application/json": components["schemas"]["ThreadCreateResponse"];
+          "application/json": components["schemas"]["ApprovalResolveResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Cancel Run */
+  api_cancel_run_runs__run_id__cancel_post: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+      path: {
+        run_id: string;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["RunResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Get Thread */
+  api_get_thread_threads__thread_id__get: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+      path: {
+        thread_id: string;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["ThreadResponse"];
         };
       };
       /** @description Validation Error */
@@ -685,10 +1286,12 @@ export interface operations {
     };
   };
   /** Api Delete Thread */
-  api_delete_thread_sessions__session_id__threads__thread_id__delete: {
+  api_delete_thread_threads__thread_id__delete: {
     parameters: {
+      query?: {
+        token?: string | null;
+      };
       path: {
-        session_id: string;
         thread_id: string;
       };
     };
@@ -707,11 +1310,43 @@ export interface operations {
       };
     };
   };
-  /** Api Clear Thread */
-  api_clear_thread_sessions__session_id__threads__thread_id__clear_post: {
+  /** Api Update Thread */
+  api_update_thread_threads__thread_id__patch: {
     parameters: {
+      query?: {
+        token?: string | null;
+      };
       path: {
-        session_id: string;
+        thread_id: string;
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ThreadUpdateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["ThreadResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Clear Thread */
+  api_clear_thread_threads__thread_id__clear_post: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+      path: {
         thread_id: string;
       };
     };
@@ -730,11 +1365,40 @@ export interface operations {
       };
     };
   };
-  /** Api List Thread Models */
-  api_list_thread_models_sessions__session_id__threads__thread_id__models_get: {
+  /** Api List Thread Items */
+  api_list_thread_items_threads__thread_id__items_get: {
     parameters: {
+      query?: {
+        after_seq?: number;
+        limit?: number;
+        token?: string | null;
+      };
       path: {
-        session_id: string;
+        thread_id: string;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["ItemListResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api List Thread Models */
+  api_list_thread_models_threads__thread_id__models_get: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+      path: {
         thread_id: string;
       };
     };
@@ -753,11 +1417,14 @@ export interface operations {
       };
     };
   };
-  /** Api Thread State */
-  api_thread_state_sessions__session_id__threads__thread_id__state_get: {
+  /** Api List Runs */
+  api_list_runs_threads__thread_id__runs_get: {
     parameters: {
+      query?: {
+        limit?: number;
+        token?: string | null;
+      };
       path: {
-        session_id: string;
         thread_id: string;
       };
     };
@@ -765,7 +1432,7 @@ export interface operations {
       /** @description Successful Response */
       200: {
         content: {
-          "application/json": components["schemas"]["ThreadStateResponse"];
+          "application/json": components["schemas"]["RunListResponse"];
         };
       };
       /** @description Validation Error */
@@ -776,24 +1443,26 @@ export interface operations {
       };
     };
   };
-  /** Api Update Thread State */
-  api_update_thread_state_sessions__session_id__threads__thread_id__state_patch: {
+  /** Api Start Run */
+  api_start_run_threads__thread_id__runs_post: {
     parameters: {
+      query?: {
+        token?: string | null;
+      };
       path: {
-        session_id: string;
         thread_id: string;
       };
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["ThreadStateUpdateRequest"];
+        "application/json": components["schemas"]["RunCreateRequest"];
       };
     };
     responses: {
       /** @description Successful Response */
-      200: {
+      202: {
         content: {
-          "application/json": components["schemas"]["ThreadStateResponse"];
+          "application/json": components["schemas"]["RunCreateResponse"];
         };
       };
       /** @description Validation Error */
@@ -804,13 +1473,320 @@ export interface operations {
       };
     };
   };
-  /** Ui Chat */
-  ui_chat_ui_chat_post: {
+  /** Api List Workspaces */
+  api_list_workspaces_workspaces_get: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+    };
     responses: {
       /** @description Successful Response */
       200: {
         content: {
-          "application/json": unknown;
+          "application/json": components["schemas"]["WorkspaceListResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Register Workspace */
+  api_register_workspace_workspaces_post: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["WorkspaceCreateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["WorkspaceResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Get Workspace */
+  api_get_workspace_workspaces__workspace_id__get: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+      path: {
+        workspace_id: string;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["WorkspaceResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Delete Workspace */
+  api_delete_workspace_workspaces__workspace_id__delete: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+      path: {
+        workspace_id: string;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["WorkspaceDeleteResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Update Workspace */
+  api_update_workspace_workspaces__workspace_id__patch: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+      path: {
+        workspace_id: string;
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["WorkspaceUpdateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["WorkspaceResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Read Workspace File */
+  api_read_workspace_file_workspaces__workspace_id__file_get: {
+    parameters: {
+      query: {
+        path: string;
+        max_bytes?: number;
+        token?: string | null;
+      };
+      path: {
+        workspace_id: string;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["WorkspaceFileReadResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api List Workspace Files */
+  api_list_workspace_files_workspaces__workspace_id__files_get: {
+    parameters: {
+      query?: {
+        path?: string;
+        include_hidden?: boolean;
+        limit?: number;
+        token?: string | null;
+      };
+      path: {
+        workspace_id: string;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["WorkspaceFilesResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Workspace Git Diff */
+  api_workspace_git_diff_workspaces__workspace_id__git_diff_get: {
+    parameters: {
+      query?: {
+        path?: string | null;
+        staged?: boolean;
+        max_chars?: number;
+        token?: string | null;
+      };
+      path: {
+        workspace_id: string;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["GitDiffResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Workspace Git Status */
+  api_workspace_git_status_workspaces__workspace_id__git_status_get: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+      path: {
+        workspace_id: string;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["GitStatusResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Get Plugin State */
+  api_get_plugin_state_workspaces__workspace_id__plugins__agent_id__state_get: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+      path: {
+        workspace_id: string;
+        agent_id: string;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["PluginStateResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api List Threads */
+  api_list_threads_workspaces__workspace_id__threads_get: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+      path: {
+        workspace_id: string;
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["ThreadListResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  /** Api Create Thread */
+  api_create_thread_workspaces__workspace_id__threads_post: {
+    parameters: {
+      query?: {
+        token?: string | null;
+      };
+      path: {
+        workspace_id: string;
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ThreadCreateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        content: {
+          "application/json": components["schemas"]["ThreadResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
         };
       };
     };

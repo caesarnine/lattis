@@ -1,0 +1,23 @@
+{
+  "name": "@lattis/client",
+  "version": "0.1.0",
+  "description": "Typed TypeScript client SDK (REST + SSE Event Bus) for the Lattis daemon",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "gen:openapi": "uv run python ../scripts/generate_openapi_json.py --out openapi.json && npx openapi-typescript openapi.json -o src/generated/openapi.ts",
+    "build": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  }
+}

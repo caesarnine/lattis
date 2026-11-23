@@ -7,7 +7,10 @@ import { type RenderItem } from "@/features/chat/types";
 import { Separator } from "@/shared/ui/separator";
 
 type ChatPanelProps = {
-  currentThread: string | null;
+  currentThreadId: string | null;
+  threadTitle: string;
+  workspaceName: string;
+  threadStatus: "idle" | "running" | "waiting_approval";
   agentName: string | null;
   agentLabel: string;
   modelLabel: string;
@@ -16,8 +19,12 @@ type ChatPanelProps = {
   items: RenderItem[];
   isLoadingHistory: boolean;
   canSend: boolean;
+  changedFileCount: number;
+  isInspectorOpen: boolean;
+  onToggleInspector: () => void;
   onSend: (message: string) => void;
   onStop: () => void;
+  onResolveApproval: (runId: string, approvalId: string, approved: boolean) => Promise<void> | void;
   onOpenThreads: () => void;
   scrollRef: RefObject<HTMLDivElement>;
   onScroll: (event: UIEvent<HTMLDivElement>) => void;
@@ -26,7 +33,10 @@ type ChatPanelProps = {
 };
 
 export function ChatPanel({
-  currentThread,
+  currentThreadId,
+  threadTitle,
+  workspaceName,
+  threadStatus,
   agentName,
   agentLabel,
   modelLabel,
@@ -35,8 +45,12 @@ export function ChatPanel({
   items,
   isLoadingHistory,
   canSend,
+  changedFileCount,
+  isInspectorOpen,
+  onToggleInspector,
   onSend,
   onStop,
+  onResolveApproval,
   onOpenThreads,
   scrollRef,
   onScroll,
@@ -46,11 +60,15 @@ export function ChatPanel({
   return (
     <main className="flex min-w-0 min-h-0 flex-1 flex-col border-ink-200/70 bg-glass shadow-soft overflow-hidden md:rounded-3xl md:border">
       <ChatHeader
-        currentThread={currentThread}
-        isStreaming={isStreaming}
+        threadTitle={threadTitle}
+        workspaceName={workspaceName}
+        threadStatus={threadStatus}
         agentLabel={agentLabel}
         modelLabel={modelLabel}
         statusMessage={statusMessage}
+        changedFileCount={changedFileCount}
+        isInspectorOpen={isInspectorOpen}
+        onToggleInspector={onToggleInspector}
         onOpenThreads={onOpenThreads}
       />
 
@@ -60,6 +78,7 @@ export function ChatPanel({
         items={items}
         isLoadingHistory={isLoadingHistory}
         agentName={agentName}
+        onResolveApproval={onResolveApproval}
         scrollRef={scrollRef}
         onScroll={onScroll}
         showScrollButton={showScrollButton}
@@ -74,7 +93,7 @@ export function ChatPanel({
         isStreaming={isStreaming}
         agentName={agentName}
         canSend={canSend}
-        resetKey={currentThread}
+        resetKey={currentThreadId}
       />
     </main>
   );

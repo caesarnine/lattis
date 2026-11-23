@@ -1,0 +1,20 @@
+import type { components } from "./generated/openapi.js";
+
+export type Health = components["schemas"]["HealthResponse"];
+export type ServerInfo = components["schemas"]["ServerInfoResponse"];
+export type AgentInfo = components["schemas"]["AgentInfo"];
+export type Workspace = components["schemas"]["WorkspaceResponse"];
+export type FileEntry = components["schemas"]["FileEntryResponse"];
+export type WorkspaceFiles = components["schemas"]["WorkspaceFilesResponse"];
+export type WorkspaceFileRead = components["schemas"]["WorkspaceFileReadResponse"];
+export type GitFileStatus = components["schemas"]["GitFileStatusResponse"];
+export type GitStatus = components["schemas"]["GitStatusResponse"];
+export type GitDiff = components["schemas"]["GitDiffResponse"];
+export type Thread = components["schemas"]["ThreadResponse"];
+export type Item = components["schemas"]["ItemResponse"];
+export type Run = components["schemas"]["RunResponse"];
+export type RunCreateResult = components["schemas"]["RunCreateResponse"];
+export type ApprovalResolveResult = components["schemas"]["ApprovalResolveResponse"];
+export type PluginState = components["schemas"]["PluginStateResponse"];
+export type LattisEvent = components["schemas"]["EventSchemaEnvelope"]["event"];
+export type EventConnectionStatus = "connected" | "reconnecting" | "auth_required";

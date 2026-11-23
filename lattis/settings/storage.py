@@ -1,143 +1,191 @@
 from __future__ import annotations
 
+import json
 import os
-import uuid
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from lattis.settings.env import (
-    LATTIS_DATA_DIR,
-    LATTIS_DATA_DIR_NAME,
-    LATTIS_DB_PATH,
-    LATTIS_PROJECT_ROOT,
-    LATTIS_SESSION_FILE,
-    LATTIS_SESSION_ID,
-    LATTIS_WORKSPACE_DIR,
+    LATTIS_API_TOKEN,
+    LATTIS_CORS_ORIGINS,
+    LATTIS_HOME,
+    LATTIS_NO_AUTH,
+    read_bool_env,
+    read_csv_env,
     read_env,
 )
 
+DEFAULT_DAEMON_HOST = "127.0.0.1"
+DEFAULT_DAEMON_PORT = 7700
+
 
 @dataclass(frozen=True)
-class StorageConfig:
-    data_dir: Path
+class DaemonConfig:
+    home_dir: Path
     db_path: Path
-    session_id_path: Path
-    workspace_dir: Path
-    project_root: Path
+    daemon_info_path: Path
+    token_path: Path
+    plugins_dir: Path
+    workspaces_dir: Path
+    global_workspace_dir: Path
+    cors_origins: tuple[str, ...] = ()
+    auth_disabled: bool = False
+
+    def plugin_data_dir(self, agent_id: str) -> Path:
+        path = self.plugins_dir / _safe_segment(agent_id)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def workspace_data_dir(self, workspace_id: str, agent_id: str) -> Path:
+        path = self.workspaces_dir / _safe_segment(workspace_id) / "plugins" / _safe_segment(agent_id)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+
+@dataclass(frozen=True)
+class DaemonInfo:
+    pid: int
+    host: str
+    port: int
+    api_url: str
+    version: str
+    started_at: float
+
+
+def _safe_segment(value: str) -> str:
+    cleaned = "".join(ch if (ch.isalnum() or ch in {"-", "_", "."}) else "_" for ch in value.strip())
+    return cleaned.strip(".") or "default"
 
 
 def _coerce_path(value: Path | str) -> Path:
-    return Path(value).expanduser()
+    return Path(value).expanduser().resolve(strict=False)
 
 
-def _normalize_data_dir_name(value: str | None) -> str:
-    if value is None:
-        return "lattis"
-    value = value.strip().lstrip(".")
-    if not value:
-        return "lattis"
-    for sep in (os.sep, os.altsep):
-        if sep and sep in value:
-            return "lattis"
-    return value
-
-
-def resolve_storage_config(
+def resolve_daemon_config(
     *,
-    project_root: Path | str | None = None,
-    data_dir_name: str | None = None,
-    data_dir: Path | str | None = None,
-    workspace_dir: Path | str | None = None,
+    home_dir: Path | str | None = None,
     db_path: Path | str | None = None,
-    session_id_path: Path | str | None = None,
-) -> StorageConfig:
-    if project_root is not None:
-        resolved_project_root = _coerce_path(project_root)
+    cors_origins: tuple[str, ...] | list[str] | None = None,
+    auth_disabled: bool | None = None,
+) -> DaemonConfig:
+    if home_dir is not None:
+        resolved_home = _coerce_path(home_dir)
     else:
-        resolved_project_root = Path.cwd()
-    if data_dir is None:
-        dir_name = f".{_normalize_data_dir_name(data_dir_name)}"
-        data_dir = resolved_project_root / dir_name
-    else:
-        data_dir = _coerce_path(data_dir)
+        env_home = read_env(LATTIS_HOME)
+        resolved_home = _coerce_path(env_home) if env_home else _coerce_path(Path.home() / ".lattis")
 
-    if workspace_dir is None:
-        workspace_dir = data_dir / "workspace"
-    else:
-        workspace_dir = _coerce_path(workspace_dir)
-
-    db_path = _coerce_path(db_path) if db_path is not None else data_dir / "lattis.db"
-    session_id_path = (
-        _coerce_path(session_id_path) if session_id_path is not None else data_dir / "session_id"
+    resolved_db = _coerce_path(db_path) if db_path is not None else resolved_home / "lattis.db"
+    resolved_cors = (
+        tuple(cors_origins) if cors_origins is not None else tuple(read_csv_env(LATTIS_CORS_ORIGINS))
+    )
+    resolved_no_auth = (
+        auth_disabled if auth_disabled is not None else read_bool_env(LATTIS_NO_AUTH, default=False)
     )
 
-    return StorageConfig(
-        data_dir=data_dir,
+    workspaces_dir = resolved_home / "workspaces"
+    return DaemonConfig(
+        home_dir=resolved_home,
+        db_path=resolved_db,
+        daemon_info_path=resolved_home / "daemon.json",
+        token_path=resolved_home / "auth.token",
+        plugins_dir=resolved_home / "plugins",
+        workspaces_dir=workspaces_dir,
+        global_workspace_dir=workspaces_dir / "global",
+        cors_origins=resolved_cors,
+        auth_disabled=resolved_no_auth,
+    )
+
+
+def ensure_daemon_dirs(config: DaemonConfig) -> None:
+    config.home_dir.mkdir(parents=True, exist_ok=True)
+    config.plugins_dir.mkdir(parents=True, exist_ok=True)
+    config.workspaces_dir.mkdir(parents=True, exist_ok=True)
+    config.global_workspace_dir.mkdir(parents=True, exist_ok=True)
+
+
+def load_daemon_config(
+    *,
+    home_dir: Path | str | None = None,
+    db_path: Path | str | None = None,
+    cors_origins: tuple[str, ...] | list[str] | None = None,
+    auth_disabled: bool | None = None,
+) -> DaemonConfig:
+    config = resolve_daemon_config(
+        home_dir=home_dir,
         db_path=db_path,
-        session_id_path=session_id_path,
-        workspace_dir=workspace_dir,
-        project_root=resolved_project_root,
+        cors_origins=cors_origins,
+        auth_disabled=auth_disabled,
     )
-
-
-def ensure_storage_dirs(config: StorageConfig) -> None:
-    config.data_dir.mkdir(parents=True, exist_ok=True)
-    config.workspace_dir.mkdir(parents=True, exist_ok=True)
-
-
-def resolve_storage_config_from_env(
-    *,
-    project_root: Path | str | None = None,
-    data_dir_name: str | None = None,
-    data_dir: Path | str | None = None,
-    workspace_dir: Path | str | None = None,
-    db_path: Path | str | None = None,
-    session_id_path: Path | str | None = None,
-) -> StorageConfig:
-    env_project_root = read_env(LATTIS_PROJECT_ROOT)
-    env_data_dir_name = read_env(LATTIS_DATA_DIR_NAME)
-    env_data_dir = read_env(LATTIS_DATA_DIR)
-    env_workspace_dir = read_env(LATTIS_WORKSPACE_DIR)
-    env_db_path = read_env(LATTIS_DB_PATH)
-    env_session_path = read_env(LATTIS_SESSION_FILE)
-    return resolve_storage_config(
-        project_root=project_root or env_project_root,
-        data_dir_name=data_dir_name or env_data_dir_name,
-        data_dir=data_dir or env_data_dir,
-        workspace_dir=workspace_dir or env_workspace_dir,
-        db_path=db_path or env_db_path,
-        session_id_path=session_id_path or env_session_path,
-    )
-
-
-def load_storage_config(
-    *,
-    project_root: Path | str | None = None,
-    data_dir_name: str | None = None,
-    data_dir: Path | str | None = None,
-    workspace_dir: Path | str | None = None,
-    db_path: Path | str | None = None,
-    session_id_path: Path | str | None = None,
-) -> StorageConfig:
-    config = resolve_storage_config_from_env(
-        project_root=project_root,
-        data_dir_name=data_dir_name,
-        data_dir=data_dir,
-        workspace_dir=workspace_dir,
-        db_path=db_path,
-        session_id_path=session_id_path,
-    )
-    ensure_storage_dirs(config)
+    ensure_daemon_dirs(config)
     return config
 
 
-def load_or_create_session_id(path: Path, *, env_var: str = LATTIS_SESSION_ID) -> str:
-    override = read_env(env_var)
-    if override:
-        return override
-    if path.exists():
-        return path.read_text(encoding="utf-8").strip()
-    session_id = f"tui-{uuid.uuid4()}"
+def load_or_create_auth_token(config: DaemonConfig, *, explicit_token: str | None = None) -> str | None:
+    if config.auth_disabled:
+        return None
+    if explicit_token is not None:
+        token = explicit_token.strip()
+        return token or None
+    env_token = read_env(LATTIS_API_TOKEN)
+    if env_token:
+        return env_token
+    if config.token_path.exists():
+        existing = config.token_path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+    token = secrets.token_hex(32)
+    config.token_path.parent.mkdir(parents=True, exist_ok=True)
+    config.token_path.write_text(token + "\n", encoding="utf-8")
+    try:
+        os.chmod(config.token_path, 0o600)
+    except OSError:
+        pass
+    return token
+
+
+def write_daemon_info(path: Path, info: DaemonInfo) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(session_id, encoding="utf-8")
-    return session_id
+    payload: dict[str, Any] = {
+        "pid": info.pid,
+        "host": info.host,
+        "port": info.port,
+        "api_url": info.api_url,
+        "version": info.version,
+        "started_at": info.started_at,
+    }
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def read_daemon_info(path: Path) -> DaemonInfo | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return DaemonInfo(
+            pid=int(raw["pid"]),
+            host=str(raw["host"]),
+            port=int(raw["port"]),
+            api_url=str(raw["api_url"]),
+            version=str(raw.get("version", "unknown")),
+            started_at=float(raw.get("started_at", 0.0)),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def remove_daemon_info(path: Path, *, pid: int | None = None) -> None:
+    if pid is not None:
+        current = read_daemon_info(path)
+        if current is not None and current.pid != pid:
+            return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass

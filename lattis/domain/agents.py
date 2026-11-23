@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from lattis.agents.plugin import AgentPlugin
 from lattis.agents.registry import AgentRegistry
-from lattis.domain.sessions import SessionStore
+from lattis.domain.models import ThreadRecord, WorkspaceRecord
 
 
 @dataclass(frozen=True)
@@ -26,8 +26,17 @@ def get_default_plugin(registry: AgentRegistry) -> AgentPlugin:
     return registry.agents[registry.default_agent]
 
 
-def default_agent_selection(registry: AgentRegistry) -> AgentSelection:
-    default_id = registry.default_agent
+def default_agent_selection(
+    registry: AgentRegistry,
+    *,
+    workspace: WorkspaceRecord | None = None,
+) -> AgentSelection:
+    ws_default = None
+    if workspace and isinstance(workspace.settings, dict):
+        raw = workspace.settings.get("default_agent")
+        if isinstance(raw, str) and raw.strip():
+            ws_default = registry.resolve_id(raw.strip(), allow_fuzzy=False)
+    default_id = ws_default or registry.default_agent
     return AgentSelection(
         agent_id=default_id,
         plugin=registry.agents[default_id],
@@ -36,23 +45,21 @@ def default_agent_selection(registry: AgentRegistry) -> AgentSelection:
 
 
 def select_agent_for_thread(
-    store: SessionStore,
     registry: AgentRegistry,
+    thread: ThreadRecord,
     *,
-    session_id: str,
-    thread_id: str,
+    workspace: WorkspaceRecord | None = None,
 ) -> AgentSelection:
-    stored = store.get_thread_settings(session_id, thread_id).agent
-    if stored:
-        resolved = registry.resolve_id(stored, allow_fuzzy=False)
+    default_sel = default_agent_selection(registry, workspace=workspace)
+    if thread.agent_id:
+        resolved = registry.resolve_id(thread.agent_id, allow_fuzzy=False)
         if resolved:
-            plugin = registry.agents[resolved]
             return AgentSelection(
                 agent_id=resolved,
-                plugin=plugin,
-                default_agent_id=registry.default_agent,
+                plugin=registry.agents[resolved],
+                default_agent_id=default_sel.agent_id,
             )
-    return default_agent_selection(registry)
+    return default_sel
 
 
 def resolve_requested_agent(
@@ -60,34 +67,15 @@ def resolve_requested_agent(
     requested: str,
     *,
     allow_fuzzy: bool = True,
+    workspace: WorkspaceRecord | None = None,
 ) -> AgentSelection:
     resolved = registry.resolve_id(requested, allow_fuzzy=allow_fuzzy)
     if resolved is None:
         available = ", ".join(sorted({plugin.name for plugin in registry.agents.values()}))
         raise ValueError(f"Unknown or ambiguous agent '{requested}'. Available: {available}")
-    plugin = registry.agents[resolved]
+    default_sel = default_agent_selection(registry, workspace=workspace)
     return AgentSelection(
         agent_id=resolved,
-        plugin=plugin,
-        default_agent_id=registry.default_agent,
+        plugin=registry.agents[resolved],
+        default_agent_id=default_sel.agent_id,
     )
-
-
-def set_thread_agent(
-    store: SessionStore,
-    registry: AgentRegistry,
-    *,
-    session_id: str,
-    thread_id: str,
-    requested: str | None,
-) -> AgentSelection:
-    settings = store.get_thread_settings(session_id, thread_id)
-    if requested is None or not requested.strip():
-        settings.agent = None
-        store.set_thread_settings(session_id, thread_id, settings)
-        return default_agent_selection(registry)
-
-    selection = resolve_requested_agent(registry, requested, allow_fuzzy=True)
-    settings.agent = selection.agent_id
-    store.set_thread_settings(session_id, thread_id, settings)
-    return selection

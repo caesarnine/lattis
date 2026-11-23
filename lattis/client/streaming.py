@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 import json
-from typing import Any
+from collections.abc import AsyncIterator
+
+from lattis.protocol.schemas import LattisEvent
+from lattis.runtime.events import LattisEventAdapter
 
 
-async def iter_ui_events(lines: AsyncIterator[str]) -> AsyncIterator[dict[str, Any]]:
+async def iter_sse_events(lines: AsyncIterator[str]) -> AsyncIterator[LattisEvent]:
+    """Parse Lattis Server-Sent Events lines into validated LattisEvent objects."""
     async for line in lines:
         if not line:
+            continue
+        if line.startswith(":"):
             continue
         if not line.startswith("data:"):
             continue
@@ -15,8 +20,12 @@ async def iter_ui_events(lines: AsyncIterator[str]) -> AsyncIterator[dict[str, A
         if not payload or payload == "[DONE]":
             continue
         try:
-            data = json.loads(payload)
+            raw = json.loads(payload)
         except json.JSONDecodeError:
             continue
-        if isinstance(data, dict):
-            yield data
+        if not isinstance(raw, dict):
+            continue
+        try:
+            yield LattisEventAdapter.validate_python(raw)
+        except Exception:
+            continue

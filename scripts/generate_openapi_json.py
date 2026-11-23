@@ -5,12 +5,12 @@ import json
 import tempfile
 from pathlib import Path
 
-from lattis.settings.storage import StorageConfig
 from lattis.server.app import create_app
+from lattis.settings.storage import load_daemon_config
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate OpenAPI JSON for the Lattis server.")
+    parser = argparse.ArgumentParser(description="Generate OpenAPI JSON for the Lattis daemon.")
     parser.add_argument("--out", required=True, help="Output path for openapi.json")
     args = parser.parse_args()
 
@@ -18,19 +18,7 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="lattis-openapi-") as tmpdir:
-        tmp = Path(tmpdir)
-        data_dir = tmp / "data"
-        workspace_dir = tmp / "workspace"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        workspace_dir.mkdir(parents=True, exist_ok=True)
-
-        config = StorageConfig(
-            data_dir=data_dir,
-            db_path=data_dir / "lattis.db",
-            session_id_path=data_dir / "session_id",
-            workspace_dir=workspace_dir,
-            project_root=Path.cwd(),
-        )
+        config = load_daemon_config(home_dir=Path(tmpdir), auth_disabled=True)
         app = create_app(config=config)
         schema = app.openapi()
 
